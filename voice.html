@@ -15,6 +15,525 @@
     #mic { width: 100%; margin-top: 12px; padding: 14px; font: inherit; font-weight: 600; font-size: 15px;
            border: 0; border-radius: 12px; background: var(--accent); color: #fff; cursor: pointer; }
     #mic.live { background: var(--bad); }
+    .meter { height: 8px; margin-top: 10px; background: #eceff1; border-radius: 4px; overflow: hidden; }
+    #level { height: 100%; width: 0; background: var(--ok); transition: width .08s linear; }
+    #problem { display: none; margin-top: 10px; padding: 10px; border-radius: 10px; background: #fdecea; color: var(--bad); }
+    .box { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; min-height: 22px; }
+    #live { color: var(--muted); font-style: italic; }
+    #status.err { color: var(--bad); }
+    #status:empty { display: none; }
+    #noteMode { display: none; margin-top: 10px; padding: 8px 10px; border-radius: 10px; background: #fff7d6; }
+    .muted { color: var(--muted); font-size: 12px; }
+    input[type=text] { width: 100%; padding: 8px; font: inherit; border: 1px solid var(--line); border-radius: 8px; margin-top: 6px; }
+    details { margin-top: 14px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+    table { width: 100%; font-size: 13px; border-collapse: collapse; }
+    td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    td:first-child { font-weight: 600; white-space: nowrap; padding-right: 10px; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Audition voice remote</h1>
+  <div class="row"><span class="dot" id="connDot"></span><span id="conn">Connecting to the sidebar…</span></div>
+
+  <button id="mic">Start listening</button>
+  <div class="meter" title="Microphone level"><div id="level"></div></div>
+  <div class="muted" id="micName" style="margin-top:4px">Mic level shows here while listening.</div>
+  <label class="row muted" style="margin-top:8px">Microphone
+    <select id="micSelect" style="flex:1; min-width:0; padding:6px; font:inherit; border:1px solid var(--line); border-radius:8px"></select>
+  </label>
+  <div id="problem"></div>
+  <div class="muted" style="margin-top:6px">Wear headphones so the mic doesn’t pick up the auditions. Keep this window open and visible.</div>
+
+  <div id="noteMode">📝 Listening for your note…</div>
+  <div class="box" id="live"></div>
+  <div class="box" id="last">Say “next”, “good”, “peak”, “custom 3.5”, “N/A” or “notes …”</div>
+  <div class="box" id="status"></div>
+
+  <label class="row muted" style="margin-top:10px"><input type="checkbox" id="beep" checked> Beep when a command is sent</label>
+
+  <details>
+    <summary>Commands</summary>
+    <table>
+      <tr><td>next</td><td>1, open next</td></tr>
+      <tr><td>good</td><td>3 + yellow, open next</td></tr>
+      <tr><td>peak</td><td>5 + green, open next</td></tr>
+      <tr><td>custom …</td><td>“custom three point five” (or say “custom”, pause, then the number). Just saying a number works too. Below 3 no colour, 3+ yellow, 4+ green</td></tr>
+      <tr><td>N/A</td><td>Listened = No, both ratings N/A, red, open next</td></tr>
+      <tr><td>notes …</td><td>Add a note. Or say “notes”, pause, then the note.</td></tr>
+      <tr><td>descending</td><td>Work top → bottom</td></tr>
+      <tr><td>ascending</td><td>Work bottom → top</td></tr>
+      <tr><td>top / bottom</td><td>Jump to the first open audition from that end</td></tr>
+      <tr><td>back</td><td>Previous audition, rating unchanged</td></tr>
+      <tr><td>undo</td><td>Revert the last rating</td></tr>
+      <tr><td>replay / pause / play</td><td>Audio controls</td></tr>
+    </table>
+  </details>
+
+  <details>
+    <summary>Test without the mic</summary>
+    <input type="text" id="test" placeholder="Type a command, press Enter">
+  </details>
+
+<script>
+
+/* ===== command parser ===== */
+const SYNONYMS = {
+  next: ['next', 'necks', 'nex', 'next one', 'text'],
+  good: ['good', 'goods', 'good one'],
+  peak: ['peak', 'peek', 'peak one', 'excellent', 'excellence'],
+  undo: ['undo', 'undo that'],
+  back: ['back', 'go back', 'previous', 'last one'],
+  replay: ['replay', 'repeat', 'play again', 'restart'],
+  pause: ['pause'],
+  play: ['play', 'resume'],
+  down: ['descending', 'descend', 'go down'],
+  up: ['ascending', 'ascend', 'go up'],
+  top: ['top', 'go to top', 'go to the top', 'start from the top'],
+  bottom: ['bottom', 'go to bottom', 'go to the bottom', 'start from the bottom'],
+  na: ['na', 'n a', 'not applicable', 'n slash a']
+};
+const NUM_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, for: 4, five: 5 };
+const NOTE_PREFIX = /^\s*(?:notes?|nodes?|add (?:a )?note)\b[\s,:.\-–]*/i;
+const CUSTOM_PREFIX = /^\s*(?:custom|costume|customer)\b[\s,:.\-–]*/i;
+
+function normalize(s) {
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseCommand(raw) {
+  const original = String(raw || '').trim();
+  if (!original) return null;
+  const m = original.match(NOTE_PREFIX);
+  if (m) {
+    const text = original.slice(m[0].length).trim();
+    return text ? { cmd: 'note', text } : { cmd: 'note-start' };
+  }
+  const c = original.match(CUSTOM_PREFIX);
+  if (c) {
+    const rest = original.slice(c[0].length).trim();
+    if (!rest) return { cmd: 'custom-start' };
+    return parseScore(rest) || { cmd: 'custom-bad', text: rest };
+  }
+  const score = parseScore(original);
+  if (score) return score;
+  // "next next" → "next"
+  const s = normalize(original).split(' ').filter((w, i, a) => i === 0 || w !== a[i - 1]).join(' ');
+  for (const cmd in SYNONYMS) {
+    if (SYNONYMS[cmd].includes(s)) return { cmd };
+  }
+  return null;
+}
+// "3.5", "three point five", "four and a half", "rate five", "5 out of 5" → { cmd: 'score', value }
+function parseScore(raw) {
+  let s = String(raw).toLowerCase().replace(/[^a-z0-9.,\s]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.,]$/, '');
+  s = s.replace(/^(?:rate(?: it| them)?|rating|score|give (?:it|them)(?: a)?)\s+/, '').replace(/\s+out of (?:5|five)$/, '').trim();
+  const W = '(\\d|zero|one|two|three|four|for|five)';
+  const val = (w) => /^\d$/.test(w) ? Number(w) : NUM_WORDS[w];
+  const ok = (n) => n >= 0 && n <= 5 ? { cmd: 'score', value: Math.round(n * 10) / 10 } : null;
+  let m;
+  if (m = s.match(/^(\d)(?:[.,](\d))?$/)) return ok(Number(m[1]) + (m[2] ? Number(m[2]) / 10 : 0));
+  if (m = s.match(new RegExp('^' + W + ' point ' + W + '$'))) return ok(val(m[1]) + val(m[2]) / 10);
+  if (m = s.match(new RegExp('^' + W + ' and a half$'))) return ok(val(m[1]) + 0.5);
+  if (m = s.match(new RegExp('^' + W + '$'))) return ok(val(m[1]));
+  return null;
+}
+/* ===== end parser ===== */
+
+const $ = (id) => document.getElementById(id);
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null;
+let listening = false;
+let noteMode = false;
+let customMode = false;
+let customTimer = null;
+let noteTimer = null;
+let lastAck = 0;
+
+/* ---------- talking to the sidebar ---------- */
+function sidebar() {
+  return window.opener && !window.opener.closed ? window.opener : null;
+}
+
+function hello() {
+  const s = sidebar();
+  if (!s) {
+    setConn(false, 'Not connected. Open this window from the 🎤 button in the Sheets sidebar.');
+    return;
+  }
+  try {s.postMessage({ type: 'ar-hello' }, '*');} catch (e) {}
+  if (Date.now() - lastAck > 8000) setConn(false, 'Waiting for the sidebar… (is it still open?)');
+}
+
+function setConn(ok, text) {
+  $('connDot').classList.toggle('on', ok);
+  $('conn').textContent = text;
+}
+
+window.addEventListener('message', (e) => {
+  if (!sidebar() || e.source !== window.opener) return;
+  const d = e.data || {};
+  if (d.type === 'ar-ack') {
+    lastAck = Date.now();
+    setConn(true, "Connected · " + (d.title || 'Sheets'));
+  } else if (d.type === 'ar-status') {
+    lastAck = Date.now();
+    $('status').textContent = d.text;
+    $('status').classList.toggle('err', !!d.isErr);
+  }
+});
+
+function send(parsed, heard) {
+  const s = sidebar();
+  if (!s) {
+    setConn(false, 'Not connected. Open this window from the 🎤 button in the Sheets sidebar.');
+    return;
+  }
+  s.postMessage({ type: 'ar-command', cmd: parsed.cmd, text: parsed.text || '', value: parsed.value, heard }, '*');
+  $('last').textContent = "✓ " + heard;
+  if ($('beep').checked) beep();
+}
+
+/* ---------- handling what was heard ---------- */
+function handleUtterance(alternatives) {
+  const alts = alternatives.map((t) => String(t || '').trim()).filter(Boolean);
+  if (!alts.length) return;
+
+  let parsed = null;
+  let heard = alts[0];
+  for (const t of alts) {
+    const p = parseCommand(t);
+    if (p) {parsed = p;heard = t;break;}
+  }
+
+  if (customMode) {
+    endCustomMode();
+    const sc = parseScore(alts[0]) || (parsed && parsed.cmd === 'score' ? parsed : null);
+    if (sc) return send(sc, 'custom ' + alts[0]);
+    if (parsed && parsed.cmd !== 'custom-start' && parsed.cmd !== 'custom-bad') return send(parsed, heard);
+    $('last').textContent = "Didn’t catch a number: “" + alts[0] + "”";
+    return;
+  }
+
+  if (noteMode) {
+    endNoteMode();
+    if (parsed && parsed.cmd !== 'note-start') return send(parsed, heard);
+    return send({ cmd: 'note', text: alts[0] }, "notes " + alts[0]);
+  }
+
+  if (!parsed) {
+    $('last').textContent = "Ignored: “" + alts[0] + "”";
+    return;
+  }
+  if (parsed.cmd === 'note-start') return startNoteMode();
+  if (parsed.cmd === 'custom-start') return startCustomMode();
+  if (parsed.cmd === 'custom-bad') {$('last').textContent = "Didn’t catch a number: “" + parsed.text + "”";return;}
+  send(parsed, heard);
+}
+
+function startNoteMode() {
+  noteMode = true;
+  $('noteMode').textContent = '📝 Listening for your note…';
+  $('noteMode').style.display = 'block';
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(endNoteMode, 12000);
+}
+function startCustomMode() {
+  customMode = true;
+  $('noteMode').textContent = '🔢 Say the score (0–5)…';
+  $('noteMode').style.display = 'block';
+  clearTimeout(customTimer);
+  customTimer = setTimeout(endCustomMode, 8000);
+}
+function endCustomMode() {
+  customMode = false;
+  $('noteMode').style.display = 'none';
+  clearTimeout(customTimer);
+}
+function endNoteMode() {
+  noteMode = false;
+  $('noteMode').style.display = 'none';
+  clearTimeout(noteTimer);
+}
+
+/* ---------- problems, explained ---------- */
+function showProblem(text) {
+  $('problem').textContent = text;
+  $('problem').style.display = text ? 'block' : 'none';
+}
+
+// Things we can tell are wrong before anyone speaks.
+function browserProblem() {
+  const ua = navigator.userAgent;
+  if (/Android|iPhone|iPad|iPod/i.test(ua)) return 'Voice commands only work on a computer. Open this in desktop Chrome or Edge.';
+  if (!SR) {
+    if (/Firefox/i.test(ua)) return 'Firefox can’t do voice recognition. Open the sheet in desktop Chrome or Edge.';
+    return 'This browser can’t do voice recognition. Open the sheet in desktop Chrome or Edge.';
+  }
+  if (navigator.brave && typeof navigator.brave.isBrave === 'function') return 'Brave blocks Google’s voice service, so nothing will be heard. Open the sheet in desktop Chrome or Edge.';
+  if (/Electron/i.test(ua)) return 'This built-in browser can’t do voice recognition. Open the sheet in desktop Chrome or Edge.';
+  if (/OPR\//.test(ua)) return 'Opera usually can’t reach Google’s voice service. If nothing is heard, use desktop Chrome or Edge.';
+  if (/Safari/i.test(ua) && !/Chrome|Chromium|Edg/i.test(ua)) return 'Safari’s voice recognition is unreliable. Desktop Chrome or Edge works best.';
+  return '';
+}
+
+const MIC_BLOCKED = 'The microphone is blocked. Click the icon at the left of the address bar → Microphone → Allow, then reload this window. ' +
+'Also check your computer allows it — Mac: System Settings → Privacy & Security → Microphone → turn on Chrome. ' +
+'Windows: Settings → Privacy → Microphone → allow desktop apps.';
+const MIC_PICK = 'Pick a different mic in the Microphone menu above (or in Chrome: Settings → Privacy and security → Site settings → Microphone).';
+
+function micErrorText(err) {
+  const name = err && err.name || '';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return MIC_BLOCKED;
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No microphone was found. Plug one in, or ' + MIC_PICK.charAt(0).toLowerCase() + MIC_PICK.slice(1);
+  if (name === 'NotReadableError' || name === 'AbortError') return 'The microphone is busy or switched off. Close other apps using it (Zoom, Discord, Teams…), check it isn’t muted, and check your computer’s microphone privacy settings.';
+  return 'Couldn’t open the microphone (' + (name || 'unknown error') + '). ' + MIC_PICK;
+}
+
+function speechErrorText(code) {
+  switch (code) {
+    case 'not-allowed':
+    case 'service-not-allowed':return MIC_BLOCKED;
+    case 'audio-capture':return 'Chrome can’t get sound from the microphone. Check it’s plugged in and not muted. ' + MIC_PICK;
+    case 'network':return 'Chrome couldn’t reach Google’s voice service, which turns speech into text. Check the internet connection, turn off any VPN, and use desktop Chrome or Edge (Brave, Arc and Opera often block it).';
+    case 'language-not-supported':return 'This browser doesn’t support English voice recognition. Use desktop Chrome or Edge.';
+    default:return 'Voice recognition error: ' + code + '. Try reloading this window, or use desktop Chrome or Edge.';
+  }
+}
+
+/* ---------- choosing a mic ---------- */
+const MIC_KEY = 'arVoiceMic';
+function savedMic() {try {return localStorage.getItem(MIC_KEY) || '';} catch (e) {return '';}}
+function saveMic(id) {try {localStorage.setItem(MIC_KEY, id);} catch (e) {}}
+
+// Chrome/Edge 135+ can run recognition on a chosen mic; older ones only use the default mic.
+function canUseChosenMic() {
+  if (navigator.brave) return false;
+  const m = navigator.userAgent.match(/(?:Chrome|Edg)\/(\d+)/);
+  return !!m && Number(m[1]) >= 135;
+}
+
+async function refreshMics() {
+  const sel = $('micSelect');
+  let mics = [];
+  try {
+    mics = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+  } catch (e) {}
+  const want = sel.value || savedMic();
+  sel.innerHTML = '';
+  sel.appendChild(new Option('System default', ''));
+  mics.
+  filter((d) => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications').
+  forEach((d, i) => sel.appendChild(new Option(d.label || 'Microphone ' + (i + 1) + ' (names show after you allow the mic)', d.deviceId)));
+  sel.value = Array.from(sel.options).some((o) => o.value === want) ? want : '';
+}
+
+/* ---------- live mic level ---------- */
+let meterStream = null;
+let meterCtx = null;
+let meterTimer = null;
+let silenceTimer = null;
+let peakLevel = 0;
+
+async function startMeter() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showProblem('This page can’t use the microphone here. Open it from the sidebar’s 🎤 button in desktop Chrome or Edge.');
+    return false;
+  }
+  const chosen = canUseChosenMic() ? $('micSelect').value : '';
+  try {
+    meterStream = await navigator.mediaDevices.getUserMedia({ audio: chosen ? { deviceId: { exact: chosen } } : true });
+  } catch (err) {
+    if (chosen && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+      // The chosen mic was unplugged: fall back to the default one.
+      $('micSelect').value = '';
+      saveMic('');
+      return startMeter();
+    }
+    showProblem(micErrorText(err));
+    return false;
+  }
+  refreshMics(); // names become visible once the mic is allowed
+  const track = meterStream.getAudioTracks()[0];
+  const label = track && track.label || 'default microphone';
+  $('micName').textContent = 'Mic: ' + label;
+  if (track) track.onended = () => {if (listening) showProblem('The microphone was disconnected. ' + MIC_PICK);};
+
+  meterCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (meterCtx.state === 'suspended') meterCtx.resume().catch(() => {});
+  const analyser = meterCtx.createAnalyser();
+  analyser.fftSize = 1024;
+  meterCtx.createMediaStreamSource(meterStream).connect(analyser);
+  const buf = new Uint8Array(analyser.fftSize);
+  peakLevel = 0;
+  meterTimer = setInterval(() => {
+    analyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {const v = (buf[i] - 128) / 128;sum += v * v;}
+    const pct = Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 400));
+    peakLevel = Math.max(peakLevel, pct);
+    $('level').style.width = pct + '%';
+  }, 80);
+
+  clearTimeout(silenceTimer);
+  silenceTimer = setTimeout(() => {
+    if (listening && peakLevel < 2) {
+      showProblem('No sound is reaching the microphone (' + label + '). Check it isn’t muted, try speaking closer to it, or pick a different mic. ' + MIC_PICK);
+    }
+  }, 6000);
+  return true;
+}
+
+function stopMeter() {
+  clearInterval(meterTimer);
+  clearTimeout(silenceTimer);
+  if (meterStream) meterStream.getTracks().forEach((t) => t.stop());
+  meterStream = null;
+  if (meterCtx) meterCtx.close().catch(() => {});
+  meterCtx = null;
+  $('level').style.width = '0%';
+}
+
+/* ---------- speech recognition ---------- */
+let noSpeechCount = 0;
+
+async function startListening() {
+  showProblem(browserProblem());
+  if ($('micSelect').value && !canUseChosenMic()) {
+    showProblem('This browser can only listen through the default mic, so your pick is ignored. Update Chrome or Edge (version 135+), or make your mic the default in Chrome: Settings → Privacy and security → Site settings → Microphone.');
+  }
+  $('mic').disabled = true;
+  const micOk = await startMeter();
+  $('mic').disabled = false;
+  if (!micOk) return;
+  if (!SR) return; // the problem box already explains; the level bar still shows the mic works
+
+  rec = new SR();
+  rec.lang = 'en-US';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.maxAlternatives = 3;
+
+  rec.onresult = (e) => {
+    noSpeechCount = 0;
+    if (!browserProblem()) showProblem('');
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) handleUtterance(Array.from(r, (a) => a.transcript));else
+      interim += r[0].transcript;
+    }
+    $('live').textContent = interim;
+  };
+  rec.onerror = (e) => {
+    if (e.error === 'aborted') return;
+    if (e.error === 'no-speech') {
+      noSpeechCount++;
+      if (noSpeechCount >= 3 && peakLevel >= 2) {
+        showProblem('The mic hears sound but no words. Speak a little closer to the mic, or check the right mic is selected. ' + MIC_PICK);
+      }
+      return;
+    }
+    showProblem(speechErrorText(e.error));
+    if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network' || e.error === 'language-not-supported') {
+      stopListening(true);
+    }
+  };
+  // Chrome stops recognising after a while; restart automatically.
+  rec.onend = () => {
+    if (listening) setTimeout(startRec, 250);else
+    updateMic();
+  };
+
+  listening = true;
+  noSpeechCount = 0;
+  startRec();
+  updateMic();
+}
+
+// Listen through the chosen mic when one is picked, otherwise the default mic.
+function startRec() {
+  const track = meterStream && meterStream.getAudioTracks()[0];
+  const useTrack = !!($('micSelect').value && track && track.readyState === 'live' && canUseChosenMic());
+  try {
+    if (useTrack) rec.start(track);else rec.start();
+  } catch (err) {
+    if (useTrack && err && err.name !== 'InvalidStateError') {
+      try {rec.start();} catch (e) {}
+      showProblem('This browser can only listen through the default mic. Update Chrome or Edge, or make your mic the default in Chrome: Settings → Privacy and security → Site settings → Microphone.');
+    }
+  }
+}
+
+function stopListening(keepProblem) {
+  listening = false;
+  endNoteMode();
+  endCustomMode();
+  if (rec) try {rec.stop();} catch (err) {}
+  stopMeter();
+  $('live').textContent = '';
+  if (!keepProblem) showProblem(browserProblem());
+  updateMic();
+}
+
+function updateMic() {
+  $('mic').textContent = listening ? '■ Stop listening' : 'Start listening';
+  $('mic').classList.toggle('live', listening);
+}
+
+/* ---------- little confirmation beep ---------- */
+let audioCtx = null;
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = 880;
+    g.gain.setValueAtTime(0.08, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.12);
+    o.connect(g).connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + 0.13);
+  } catch (e) {}
+}
+
+/* ---------- wiring ---------- */
+$('mic').onclick = () => listening ? stopListening() : startListening();
+showProblem(browserProblem());
+$('micSelect').onchange = () => {
+  saveMic($('micSelect').value);
+  if (listening) {stopListening();startListening();}
+};
+refreshMics();
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', refreshMics);
+$('test').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  handleUtterance([e.target.value]);
+  e.target.value = '';
+});
+
+hello();
+setInterval(hello, 3000);
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>🎙️ Audition Voice Remote</title>
+  <style>
+    :root { --ink:#1f2328; --muted:#6b7280; --line:#e5e7eb; --accent:#1a73e8; --ok:#34a853; --bad:#c5221f; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; font: 14px/1.45 "Google Sans", Roboto, system-ui, sans-serif; color: var(--ink); }
+    h1 { font-size: 16px; margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #d1d5db; flex: none; }
+    .dot.on { background: var(--ok); }
+    #mic { width: 100%; margin-top: 12px; padding: 14px; font: inherit; font-weight: 600; font-size: 15px;
+           border: 0; border-radius: 12px; background: var(--accent); color: #fff; cursor: pointer; }
+    #mic.live { background: var(--bad); }
     .box { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; min-height: 22px; }
     #live { color: var(--muted); font-style: italic; }
     #status.err { color: var(--bad); }
