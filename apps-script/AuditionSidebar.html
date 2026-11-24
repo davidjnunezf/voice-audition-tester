@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_blank">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --ink: #1f2328; --muted: #6b7280; --line: #e5e7eb; --bg: #fafafa;
+      --yellow: #ffe599; --green: #b6d7a8; --accent: #1a73e8; --danger: #c5221f;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 12px; font: 13px/1.4 "Google Sans", Roboto, Arial, sans-serif; color: var(--ink); }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .between { justify-content: space-between; }
+    .muted { color: var(--muted); }
+    .small { font-size: 11px; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; }
+    h1 { font-size: 13px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 10px; background: #fff; }
+    .name { font-size: 16px; font-weight: 600; margin: 0 0 2px; }
+    #media { margin-top: 8px; min-height: 40px; }
+    #media audio, #media video { width: 100%; }
+    #media iframe { width: 100%; border: 0; border-radius: 6px; background: var(--bg); }
+    .links a { display: inline-block; margin: 6px 8px 0 0; color: var(--accent); text-decoration: none; font-size: 12px; }
+    button { font: inherit; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 7px 10px; cursor: pointer; }
+    button:hover { background: var(--bg); }
+    button:disabled { opacity: .5; cursor: default; }
+    .rate { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
+    .rate button { padding: 10px 4px; font-weight: 600; }
+    .rate small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+    #bNext { background: #f1f3f4; }
+    #bGood { background: var(--yellow); border-color: #f1c232; }
+    #bPeak { background: var(--green); border-color: #6aa84f; }
+    .custom { display: flex; gap: 6px; margin-top: 6px; }
+    .custom input { flex: 1; min-width: 0; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+    #bNa { background: #ea9999; border-color: #cc4125; }
+    .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .seg button { flex: 1; border: 0; border-radius: 0; padding: 6px 8px; font-size: 12px; white-space: nowrap; }
+    .seg button.on { background: var(--accent); color: #fff; }
+    textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px; resize: vertical; min-height: 44px; }
+    #notes { white-space: pre-wrap; font-size: 12px; color: #374151; background: var(--bg); border-radius: 6px; padding: 6px 8px; margin-top: 6px; }
+    #notes:empty { display: none; }
+    #status { margin-top: 10px; font-size: 12px; min-height: 18px; }
+    #status.err { color: var(--danger); }
+    #tap { display: none; width: 100%; margin-top: 6px; background: var(--accent); color: #fff; border: 0; }
+    .voice { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+    #voiceDot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; flex: none; }
+    #voiceDot.on { background: #34a853; }
+    kbd { font: 11px ui-monospace, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+    details { margin-top: 12px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    table.cmds { width: 100%; font-size: 12px; border-collapse: collapse; margin-top: 6px; }
+    table.cmds td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    table.cmds td:first-child { font-weight: 600; white-space: nowrap; padding-right: 8px; }
+  </style>
+</head>
+<body>
+  <div class="row between">
+    <h1 id="title">Loading…</h1>
+    <span class="pill" id="remaining">–</span>
+  </div>
+
+  <div class="seg" style="margin-top:8px">
+    <button id="dirDown" title="Descending: work top → bottom">↓ Descending</button>
+    <button id="dirUp" title="Ascending: work bottom → top">↑ Ascending</button>
+  </div>
+
+  <div class="card">
+    <div class="name" id="name">–</div>
+    <div class="muted small" id="meta"></div>
+    <div id="notes"></div>
+    <div id="media"></div>
+    <button id="tap">▶ Play</button>
+  </div>
+
+  <div class="rate">
+    <button id="bNext">Next<small>1 · <kbd>N</kbd></small></button>
+    <button id="bGood">Good<small>3 · <kbd>G</kbd></small></button>
+    <button id="bPeak">Peak<small>5 · <kbd>P</kbd></small></button>
+    <button id="bNa">N/A<small>No · <kbd>X</kbd></small></button>
+  </div>
+  <div class="custom">
+    <input id="customInput" type="number" min="0" max="5" step="0.1" placeholder="Custom score, e.g. 3.5  (C)">
+    <button id="bCustom">Rate</button>
+  </div>
+  <div class="row" style="margin-top:6px; flex-wrap:wrap">
+    <button id="bBack" class="small" title="Previous audition (rating unchanged)">← Back <kbd>B</kbd></button>
+    <button id="bUndo" class="small">↶ Undo <kbd>U</kbd></button>
+    <button id="bReplay" class="small">⟲ Replay <kbd>R</kbd></button>
+    <button id="bHere" class="small" title="Review whichever row is selected in the sheet">Use selected row</button>
+  </div>
+
+  <div style="margin-top:10px">
+    <textarea id="noteInput" placeholder="Add a note… (Enter to save)"></textarea>
+  </div>
+
+  <div class="voice">
+    <span id="voiceDot" title="Voice remote"></span>
+    <button id="bVoice">🎤 Open voice remote</button>
+  </div>
+  <div class="muted small" id="heard"></div>
+
+  <div id="status"></div>
+
+  <details>
+    <summary>Voice commands</summary>
+    <table class="cmds">
+      <tr><td>next</td><td>1, Listened = Yes, open next</td></tr>
+      <tr><td>good</td><td>3 + yellow, open next</td></tr>
+      <tr><td>peak</td><td>5 + green, open next</td></tr>
+      <tr><td>custom …</td><td>“custom three point five”, “custom four and a half”, or just say the number. Below 3 no colour, 3+ yellow, 4+ green. Keys 1–5 too.</td></tr>
+      <tr><td>N/A</td><td>Listened = No, both ratings N/A, red, open next</td></tr>
+      <tr><td>notes …</td><td>Add a note (or say “notes”, pause, then the note)</td></tr>
+      <tr><td>descending</td><td>Work top → bottom</td></tr>
+      <tr><td>ascending</td><td>Work bottom → top</td></tr>
+      <tr><td>top / bottom</td><td>Jump to the first open audition from that end</td></tr>
+      <tr><td>back</td><td>Previous audition, rating unchanged (re-listen or re-rate)</td></tr>
+      <tr><td>undo</td><td>Revert the last rating and go back</td></tr>
+      <tr><td>replay / pause / play</td><td>Control the audio</td></tr>
+    </table>
+  </details>
+
+<script>
+
+const CFG = <?!= clientConfig ?>;
+
+const state = {
+  sheet: null,
+  dir: 'down',
+  current: null,
+  remaining: 0,
+  undoStack: [],
+  history: [],
+  voiceSource: null
+};
+const cache = new Map(); // Drive fileId -> Promise<audio result>
+let queue = Promise.resolve();
+let token = 0;
+let player = null;
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------- server calls ---------- */
+function run(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args);
+  });
+}
+function enqueue(task) {
+  queue = queue.then(task).catch((err) => status(err && err.message || String(err), true));
+  return queue;
+}
+
+/* ---------- commands (buttons, keys and voice all land here) ---------- */
+function command(cmd, arg) {
+  // Audio controls run immediately; everything else runs in order.
+  if (cmd === 'replay') return replay();
+  if (cmd === 'pause') return player && player.pause();
+  if (cmd === 'play') return play();
+  return enqueue(async () => {
+    switch (cmd) {
+      case 'next':case 'good':case 'peak':case 'excellent':case 'na':return rate(cmd);
+      case 'score':return rate(cmd, arg);
+      case 'note':return addNote(arg);
+      case 'undo':return undo();
+      case 'back':return back();
+      case 'down':case 'up':return setDir(cmd);
+      case 'top':case 'bottom':return jump(cmd);
+      default:throw new Error('Unknown command: ' + cmd);
+    }
+  });
+}
+
+async function rate(cmd, value) {
+  const cur = state.current;
+  if (!cur) throw new Error('Nothing open to rate. Try “top” or “bottom”.');
+  stopMedia();
+  const res = await run('ar_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value);
+  state.undoStack.push(res.undo);
+  if (state.undoStack.length > 25) state.undoStack.shift();
+  state.history.push(cur.row);
+  if (state.history.length > 100) state.history.shift();
+  state.remaining = res.remaining;
+  const label = { next: 'Next', good: 'Good', peak: 'Peak', excellent: 'Peak', na: 'N/A', score: 'Custom' }[cmd];
+  show(res.next, cmd === 'na' ? "N/A → " + res.rated.name : label + " " + res.rated.rating + " → " + res.rated.name);
+}
+
+async function addNote(text) {
+  const cur = state.current;
+  if (!cur) throw new Error('No audition open.');
+  const t = String(text || '').trim();
+  if (!t) return;
+  const res = await run('ar_addNote', state.sheet, cur.row, t);
+  if (state.current && state.current.row === res.row) {
+    state.current.notes = res.notes;
+    renderCard();
+  }
+  status("Note added → " + cur.name);
+}
+
+async function undo() {
+  const u = state.undoStack.pop();
+  if (!u) throw new Error('Nothing to undo.');
+  stopMedia();
+  const res = await run('ar_undo', state.sheet, u);
+  if (state.history[state.history.length - 1] === u.row) state.history.pop();
+  state.remaining = res.remaining;
+  show(res.current, "Undid rating → " + res.current.name);
+}
+
+async function back() {
+  const cur = state.current;
+  let row = state.history.pop();
+  if (!row) {
+    if (!cur) throw new Error('Nothing to go back to.');
+    row = state.dir === 'up' ? cur.row + 1 : cur.row - 1;
+  }
+  if (row < 2) throw new Error('Already at the first audition.');
+  stopMedia();
+  const res = await run('ar_rowAt', state.sheet, row);
+  state.remaining = res.remaining;
+  show(res.current, 'Back');
+}
+
+async function setDir(d) {
+  state.dir = d === 'up' ? 'up' : 'down';
+  renderCard();
+  status(state.dir === 'down' ? 'Descending: top → bottom' : 'Ascending: bottom → top');
+  run('ar_setDir', state.dir).catch(() => {});
+  if (state.current) prefetch(state.current);
+}
+
+async function jump(where) {
+  stopMedia();
+  const res = await run('ar_jump', state.sheet, where);
+  state.dir = res.dir;
+  state.remaining = res.remaining;
+  show(res.current, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
+}
+
+async function startHere() {
+  stopMedia();
+  const res = await run('ar_startHere', state.sheet);
+  state.remaining = res.remaining;
+  show(res.current, "Row " + res.current.row);
+}
+
+/* ---------- rendering ---------- */
+function show(info, msg) {
+  state.current = info;
+  const my = ++token;
+  renderCard();
+  const now = info ? "Now: " + displayName(info) + " (row " + info.row + ")" : 'All done in this direction 🎉';
+  status(msg ? msg + " · " + now : now);
+  renderMedia(info, my); // not awaited, so commands never wait on audio
+  if (info) prefetch(info);
+}
+
+function displayName(c) {
+  const alias = c.alias && c.alias.toLowerCase() !== c.name.toLowerCase() ? " (" + c.alias + ")" : '';
+  return c.name + alias;
+}
+
+function renderCard() {
+  $('remaining').textContent = state.remaining + " left";
+  $('dirDown').classList.toggle('on', state.dir === 'down');
+  $('dirUp').classList.toggle('on', state.dir === 'up');
+  const c = state.current;
+  ['bNext', 'bGood', 'bPeak', 'bNa', 'bCustom'].forEach((id) => {$(id).disabled = !c;});
+  if (!c) {
+    $('name').textContent = 'All caught up';
+    $('meta').textContent = 'No unlistened auditions left in this direction.';
+    $('notes').textContent = '';
+    return;
+  }
+  $('name').textContent = displayName(c);
+  const bits = ["Row " + c.row];
+  if (c.listened) bits.push("Listened: " + c.listened);
+  if (c.rating) bits.push("Rated " + c.rating);
+  $('meta').textContent = bits.join(' · ');
+  $('notes').textContent = c.notes || '';
+}
+
+async function renderMedia(info, my) {
+  const box = $('media');
+  box.innerHTML = '';
+  hideTap();
+  if (!info) return;
+  if (!info.media.length) {
+    box.innerHTML = '<div class="muted">No audition file or link on this row.</div>';
+    return;
+  }
+
+  const links = document.createElement('div');
+  links.className = 'links';
+  info.media.forEach((m, i) => {
+    const a = document.createElement('a');
+    a.href = m.url;
+    a.textContent = info.media.length > 1 ? "Open " + (i + 1) + " ↗" : 'Open ↗';
+    links.appendChild(a);
+  });
+
+  const first = info.media[0];
+  if (first.kind === 'drive') {
+    box.innerHTML = '<div class="muted">Loading audio…</div>';
+    const res = await loadDrive(first.id);
+    if (my !== token) return;
+    box.innerHTML = '';
+    if (res.mode === 'inline' && res.url) {
+      mountPlayer(box, res, my);
+      if (res.folderCount > 1) addHint(box, 'From their Drive folder (' + res.folderCount + ' files). Open ↗ for the rest.');
+    } else if (res.fileId) {
+      mountDrivePreview(box, res.fileId, res.folderCount ? 'From their Drive folder' : '');
+    } else if (first.folder) {
+      mountFolderView(box, first.id, res.error);
+    } else {
+      mountDrivePreview(box, first.id, res.error ? 'Using Drive’s player' : '');
+    }
+  } else {
+    const yt = youTubeId(first.url);
+    if (yt) {
+      const f = document.createElement('iframe');
+      f.src = "https://www.youtube.com/embed/" + yt + "?autoplay=1";
+      f.height = 170;
+      f.allow = 'autoplay; encrypted-media';
+      box.appendChild(f);
+    } else {
+      const b = document.createElement('a');
+      b.href = first.url;
+      b.innerHTML = '<button style="width:100%">Open their link ↗</button>';
+      box.appendChild(b);
+    }
+  }
+  box.appendChild(links);
+}
+
+function mountPlayer(box, res, my) {
+  const el = document.createElement(res.mime.indexOf('video/') === 0 ? 'video' : 'audio');
+  el.controls = true;
+  el.preload = 'auto';
+  el.src = res.url;
+  el.onerror = () => {
+    if (my !== token) return;
+    box.innerHTML = '';
+    mountDrivePreview(box, res.fileId || res.id, 'Couldn’t play inline — using Drive’s player');
+  };
+  box.appendChild(el);
+  player = el;
+  play();
+}
+
+function addHint(box, text) {
+  const n = document.createElement('div');
+  n.className = 'muted small';
+  n.textContent = text;
+  box.appendChild(n);
+}
+
+function mountFolderView(box, id, err) {
+  player = null;
+  addHint(box, err ? 'Couldn’t find audio in their folder — showing the folder' : 'Their Drive folder');
+  const f = document.createElement('iframe');
+  f.src = 'https://drive.google.com/embeddedfolderview?id=' + id + '#list';
+  f.height = 160;
+  box.appendChild(f);
+}
+
+function mountDrivePreview(box, id, note) {
+  player = null;
+  if (note) addHint(box, note);
+  const f = document.createElement('iframe');
+  f.src = "https://drive.google.com/file/d/" + id + "/preview";
+  f.height = 140;
+  f.allow = 'autoplay';
+  box.appendChild(f);
+}
+
+function play() {
+  if (!player) return;
+  const p = player.play();
+  if (p && p.catch) p.then(hideTap).catch(showTap);
+}
+function replay() {if (player) {player.currentTime = 0;play();}}
+function stopMedia() {if (player) {try {player.pause();} catch (e) {}}player = null;}
+function showTap() {$('tap').style.display = 'block';}
+function hideTap() {$('tap').style.display = 'none';}
+
+/* ---------- audio loading + preloading ---------- */
+function loadDrive(id) {
+  if (cache.has(id)) return cache.get(id);
+  const p = run('ar_getAudio', id).
+  then((res) => {
+    if (res.mode === 'inline' && res.b64) {
+      res.url = URL.createObjectURL(b64ToBlob(res.b64, res.mime));
+      delete res.b64;
+    }
+    return res;
+  }).
+  catch((err) => ({ ok: false, mode: 'preview', id, error: String(err) }));
+  cache.set(id, p);
+  trimCache();
+  return p;
+}
+
+function trimCache() {
+  const keep = new Set((state.current ? state.current.media : []).map((m) => m.id));
+  for (const [id, p] of cache) {
+    if (cache.size <= 6) break;
+    if (keep.has(id)) continue;
+    cache.delete(id);
+    p.then((r) => r && r.url && URL.revokeObjectURL(r.url));
+  }
+}
+
+function prefetch(info) {
+  run('ar_peek', state.sheet, info.row, state.dir).
+  then((n) => {
+    const d = n && n.media.find((m) => m.kind === 'drive');
+    if (d) loadDrive(d.id);
+  }).
+  catch(() => {});
+}
+
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+function youTubeId(url) {
+  const m = url.match(/youtu\.be\/([\w-]{11})/) ||
+  url.match(/youtube\.com\/.*[?&]v=([\w-]{11})/) ||
+  url.match(/youtube\.com\/(?:shorts|embed|live)\/([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+/* ---------- status (also echoed to the voice remote) ---------- */
+function status(msg, isErr) {
+  const s = $('status');
+  s.textContent = msg;
+  s.classList.toggle('err', !!isErr);
+  tellVoice(msg, isErr);
+}
+
+/* ---------- voice remote ---------- */
+const VOICE_ORIGIN = (() => {try {return new URL(CFG.voiceUrl).origin;} catch (e) {return null;}})();
+
+function openVoice() {
+  if (!VOICE_ORIGIN || /YOUR-GITHUB-USERNAME/.test(CFG.voiceUrl)) {
+    status('Set voiceUrl in AR_CONFIG to where you hosted voice.html (see README).', true);
+    return;
+  }
+  const w = window.open(CFG.voiceUrl, 'arVoiceRemote', 'width=380,height=480');
+  if (!w) status('Popup blocked — allow popups for docs.google.com and try again.', true);
+}
+
+function tellVoice(text, isErr) {
+  if (!state.voiceSource) return;
+  try {state.voiceSource.postMessage({ type: 'ar-status', text, isErr: !!isErr }, VOICE_ORIGIN);} catch (e) {}
+}
+
+window.addEventListener('message', (e) => {
+  if (!VOICE_ORIGIN || e.origin !== VOICE_ORIGIN) return;
+  const d = e.data || {};
+  if (d.type === 'ar-hello') {
+    state.voiceSource = e.source;
+    $('voiceDot').classList.add('on');
+    try {e.source.postMessage({ type: 'ar-ack', title: $('title').textContent }, VOICE_ORIGIN);} catch (err) {}
+    return;
+  }
+  if (d.type === 'ar-command' && typeof d.cmd === 'string') {
+    state.voiceSource = e.source;
+    $('voiceDot').classList.add('on');
+    $('heard').textContent = "Heard: “" + (d.heard || d.cmd) + "”";
+    command(d.cmd, d.cmd === 'score' ? d.value : d.text);
+  }
+});
+
+/* ---------- wiring ---------- */
+$('bNext').onclick = () => command('next');
+$('bGood').onclick = () => command('good');
+$('bPeak').onclick = () => command('peak');
+$('bCustom').onclick = submitCustom;
+$('bNa').onclick = () => command('na');
+$('bUndo').onclick = () => command('undo');
+$('bBack').onclick = () => command('back');
+$('bReplay').onclick = () => command('replay');
+$('dirDown').onclick = () => command('down');
+$('dirUp').onclick = () => command('up');
+$('bHere').onclick = () => enqueue(startHere);
+$('bVoice').onclick = openVoice;
+$('tap').onclick = play;
+
+function submitCustom() {
+  const raw = $('customInput').value.trim();
+  const v = Number(raw);
+  if (!raw || isNaN(v) || v < 0 || v > 5) {status('Custom score must be a number from 0 to 5.', true);return;}
+  $('customInput').value = '';
+  $('customInput').blur();
+  command('score', Math.round(v * 10) / 10);
+}
+
+function submitNote() {
+  const t = $('noteInput').value.trim();
+  if (!t) return;
+  $('noteInput').value = '';
+  command('note', t);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.matches('textarea, input')) {
+    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'noteInput') {e.preventDefault();submitNote();}
+    if (e.key === 'Enter' && e.target.id === 'customInput') {e.preventDefault();submitCustom();}
+    if (e.key === 'Escape') e.target.blur();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const map = { n: 'next', g: 'good', p: 'peak', e: 'peak', x: 'na', b: 'back', u: 'undo', r: 'replay' };
+  const k = e.key.toLowerCase();
+  if (k === 'c') {e.preventDefault();$('customInput').focus();} else
+  if (map[k]) {e.preventDefault();command(map[k]);} else
+  if (/^[1-5]$/.test(k)) {e.preventDefault();command('score', Number(k));} else
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (player && !player.paused) player.pause();else play();
+  }
+});
+
+enqueue(async () => {
+  const res = await run('ar_init');
+  state.sheet = res.sheetName;
+  state.dir = res.dir;
+  state.remaining = res.remaining;
+  $('title').textContent = res.title;
+  show(res.current);
+});
+</script>
+</body>
+</html>
