@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_blank">
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --ink: #1f2328; --muted: #6b7280; --line: #e5e7eb; --bg: #fafafa;
+      --yellow: #ffe599; --green: #b6d7a8; --grey: #eceff1; --accent: #1a73e8; --danger: #c5221f;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 12px; font: 13px/1.4 "Google Sans", Roboto, Arial, sans-serif; color: var(--ink); }
+    .row { display: flex; gap: 6px; align-items: center; }
+    .between { justify-content: space-between; }
+    .muted { color: var(--muted); }
+    .small { font-size: 11px; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; white-space: nowrap; }
+    h1 { font-size: 13px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 10px; background: #fff; }
+    .name { font-size: 16px; font-weight: 600; margin: 0 0 2px; }
+    button { font: inherit; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 7px 10px; cursor: pointer; color: var(--ink); }
+    button:hover { filter: brightness(.97); }
+    button:disabled { opacity: .5; cursor: default; }
+    .primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+    .primary.attn { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 4px rgba(26, 115, 232, .25); } }
+    #bOpen { width: 100%; padding: 10px; }
+    .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    .seg button { flex: 1; border: 0; border-radius: 0; padding: 6px 8px; font-size: 12px; white-space: nowrap; }
+    .seg button.on { background: var(--accent); color: #fff; }
+    #viewerState { margin-top: 4px; }
+    #viewerState.err { color: var(--danger); }
+    .links { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+    .links a { color: var(--accent); text-decoration: none; font-size: 12px; word-break: break-all; }
+    .links a.cur { font-weight: 700; }
+    .links a.cur::before { content: '▶ '; }
+    .ptext { margin-top: 6px; font-size: 12px; background: #fff8e1; border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; }
+    .ptext:empty, #notes:empty { display: none; }
+    #notes { white-space: pre-wrap; font-size: 12px; color: #374151; background: var(--bg); border-radius: 6px; padding: 6px 8px; margin-top: 6px; }
+    .about { font-size: 12px; white-space: pre-wrap; margin-top: 4px; color: #374151; }
+    .rate { display: grid; gap: 6px; margin-top: 10px; }
+    .rate button { padding: 10px 4px; font-weight: 600; }
+    .rate small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+    .c-next { background: var(--grey); }
+    .c-good { background: var(--yellow); border-color: #f1c232; }
+    .c-peak { background: var(--green); border-color: #6aa84f; }
+    .c-na { background: #ea9999; border-color: #cc4125; }
+    textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px; resize: vertical; min-height: 44px; }
+    #status { margin-top: 10px; font-size: 12px; min-height: 18px; }
+    #status.err { color: var(--danger); }
+    .voice { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; flex: none; }
+    .dot.on { background: #34a853; }
+    kbd { font: 11px ui-monospace, monospace; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+    details { margin-top: 10px; }
+    summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    table.cmds { width: 100%; font-size: 12px; border-collapse: collapse; margin-top: 6px; }
+    table.cmds td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    table.cmds td:first-child { font-weight: 600; white-space: nowrap; padding-right: 8px; }
+  </style>
+</head>
+<body>
+  <div class="row between">
+    <h1 id="title">Loading…</h1>
+    <span class="pill" id="remaining">–</span>
+  </div>
+
+  <div style="margin-top:10px">
+    <button id="bOpen" class="primary">🖼️ Open portfolio <kbd style="color:inherit;background:transparent">O</kbd></button>
+    <div class="row" style="margin-top:6px">
+      <span class="dot" id="viewerDot" title="Portfolio window"></span>
+      <div class="seg" style="flex:1">
+        <button id="vTab" title="Portfolios open in a new browser tab">New tab</button>
+        <button id="vPopup" title="Portfolios open in a separate window beside this one">Popup window</button>
+      </div>
+    </div>
+    <div class="muted small" id="viewerState">Click “Open portfolio” once. After that, every rating opens the next portfolio in the same tab.</div>
+  </div>
+
+  <div class="seg" style="margin-top:8px">
+    <button id="dirDown" title="Work top → bottom">↓ Top → bottom</button>
+    <button id="dirUp" title="Work bottom → top">↑ Bottom → top</button>
+  </div>
+
+  <div class="card">
+    <div class="name" id="name">–</div>
+    <div class="muted small" id="meta"></div>
+    <div class="links" id="links"></div>
+    <div class="ptext" id="ptext"></div>
+    <div id="notes"></div>
+    <details id="aboutBox"><summary>About them</summary><div class="about" id="about"></div></details>
+  </div>
+
+  <div class="rate" id="rate"></div>
+  <div class="row" style="margin-top:6px; flex-wrap:wrap">
+    <button id="bSkip" class="small" title="Next portfolio without rating this one">Skip ⤼ <kbd>S</kbd></button>
+    <button id="bLink" class="small" title="Their next link, if they gave several">Next link <kbd>L</kbd></button>
+    <button id="bBack" class="small" title="Previous applicant (rating unchanged)">← Back <kbd>B</kbd></button>
+    <button id="bUndo" class="small">↶ Undo <kbd>U</kbd></button>
+    <button id="bHere" class="small" title="Review whichever row is selected in the sheet">Use selected row</button>
+  </div>
+
+  <div style="margin-top:10px">
+    <textarea id="noteInput" placeholder="Add a note… (Enter to save)"></textarea>
+  </div>
+
+  <div class="voice">
+    <span class="dot" id="voiceDot" title="Voice remote"></span>
+    <button id="bVoice">🎤 Open voice remote</button>
+  </div>
+  <div class="muted small" id="heard"></div>
+
+  <div id="status"></div>
+
+  <details>
+    <summary>Voice commands</summary>
+    <table class="cmds" id="cmdTable"></table>
+  </details>
+
+<script>
+const CFG = <?!= clientConfig ?>;
+const VIEW_NAME = 'prPortfolioViewer';
+
+const state = {
+  sheet: null,
+  dir: 'down',
+  view: 'tab',
+  current: null,
+  linkIndex: 0,
+  remaining: 0,
+  choices: [],
+  undoStack: [],
+  history: [],
+  voiceSource: null,
+  viewerWanted: false,   // set once the person opens the portfolio window
+};
+let viewer = null;       // the portfolio tab / window
+let queue = Promise.resolve();
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------- server calls ---------- */
+function run(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](...args);
+  });
+}
+function enqueue(task) {
+  queue = queue.then(task).catch((err) => status((err && err.message) || String(err), true));
+  return queue;
+}
+
+/* ---------- commands (buttons, keys and voice all land here) ---------- */
+function command(cmd, arg) {
+  // Window controls run straight away; everything that touches the sheet runs in order.
+  if (cmd === 'open' || cmd === 'replay' || cmd === 'play') return openCurrent();
+  if (cmd === 'link') return nextLink();
+  if (cmd === 'pause') return;
+  return enqueue(async () => {
+    switch (cmd) {
+      case 'next': case 'good': case 'peak': case 'excellent': case 'na': return rate(cmd);
+      case 'score': case 'option': return rate(cmd, arg);
+      case 'skip': return skip();
+      case 'note': return addNote(arg);
+      case 'undo': return undo();
+      case 'back': return back();
+      case 'down': case 'up': return setDir(cmd);
+      case 'top': case 'bottom': return jump(cmd);
+      default: throw new Error('Unknown command: ' + cmd);
+    }
+  });
+}
+
+async function rate(cmd, value) {
+  const cur = state.current;
+  if (!cur) throw new Error('Nothing open to rate. Try “top” or “bottom”.');
+  const res = await run('pr_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value);
+  state.undoStack.push(res.undo);
+  if (state.undoStack.length > 25) state.undoStack.shift();
+  pushHistory(cur.row);
+  state.remaining = res.remaining;
+  const what = res.rated.reviewed === 'No' ? 'N/A' : res.rated.rating;
+  show(res.next, `${what} → ${res.rated.name}`);
+}
+
+async function skip() {
+  const cur = state.current;
+  if (!cur) throw new Error('Nothing open to skip.');
+  const res = await run('pr_skip', state.sheet, cur.row, state.dir);
+  pushHistory(cur.row);
+  state.remaining = res.remaining;
+  show(res.next, `Skipped ${cur.name}`);
+}
+
+function pushHistory(row) {
+  state.history.push(row);
+  if (state.history.length > 100) state.history.shift();
+}
+
+async function addNote(text) {
+  const cur = state.current;
+  if (!cur) throw new Error('No applicant open.');
+  const t = String(text || '').trim();
+  if (!t) return;
+  const res = await run('pr_addNote', state.sheet, cur.row, t);
+  if (state.current && state.current.row === res.row) {
+    state.current.notes = res.notes;
+    renderCard();
+  }
+  status(`Note added → ${cur.name}`);
+}
+
+async function undo() {
+  const u = state.undoStack.pop();
+  if (!u) throw new Error('Nothing to undo.');
+  const res = await run('pr_undo', state.sheet, u);
+  if (state.history[state.history.length - 1] === u.row) state.history.pop();
+  state.remaining = res.remaining;
+  show(res.current, `Undid rating → ${res.current.name}`);
+}
+
+async function back() {
+  const cur = state.current;
+  let row = state.history.pop();
+  if (!row) {
+    if (!cur) throw new Error('Nothing to go back to.');
+    row = state.dir === 'up' ? cur.row + 1 : cur.row - 1;
+  }
+  if (row < 2) throw new Error('Already at the first applicant.');
+  const res = await run('pr_rowAt', state.sheet, row);
+  state.remaining = res.remaining;
+  show(res.current, 'Back');
+}
+
+async function setDir(d) {
+  state.dir = d === 'up' ? 'up' : 'down';
+  renderCard();
+  status(state.dir === 'down' ? 'Going top → bottom' : 'Going bottom → top');
+  run('pr_setPref', 'dir', state.dir).catch(() => {});
+}
+
+async function jump(where) {
+  const res = await run('pr_jump', state.sheet, where);
+  state.dir = res.dir;
+  state.remaining = res.remaining;
+  show(res.current, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
+}
+
+async function startHere() {
+  const res = await run('pr_startHere', state.sheet);
+  state.remaining = res.remaining;
+  show(res.current, `Row ${res.current.row}`);
+}
+
+/* ---------- the portfolio tab / window ---------- */
+function currentUrl() {
+  const c = state.current;
+  if (!c) return noteUrl({ done: true });
+  const l = c.links[state.linkIndex];
+  if (l) return l.url;
+  return noteUrl({ name: c.name, text: c.portfolio });
+}
+
+// The note page gets its text after "#", so nothing about the applicant is sent to a server.
+function noteUrl(data) {
+  return CFG.noteUrl + '#' + encodeURIComponent(JSON.stringify(data));
+}
+
+function viewerOpen() {
+  try { return !!viewer && !viewer.closed; } catch (e) { return false; }
+}
+
+function features() {
+  if (state.view !== 'popup') return '';
+  const W = screen.availWidth || 1400;
+  const H = screen.availHeight || 900;
+  const L = screen.availLeft || 0;
+  const T = screen.availTop || 0;
+  return `popup,left=${L},top=${T},width=${Math.max(640, W - 420)},height=${H}`;
+}
+
+// Points the portfolio tab at url. Returns false if the browser needs a click first.
+function showInViewer(url) {
+  if (!url) return false;
+  if (viewerOpen()) {
+    try {
+      viewer.location.replace(url);
+      watchViewer();
+      setViewerState(true);
+      return true;
+    } catch (e) { /* fall through and reopen */ }
+  }
+  let w = null;
+  try { w = window.open(url, VIEW_NAME, features()); } catch (e) { w = null; }
+  if (w) {
+    viewer = w;
+    watchViewer();
+    setViewerState(true);
+    return true;
+  }
+  setViewerState(false, 'blocked');
+  return false;
+}
+
+// Some sites cut the link back to this sidebar. Notice that, so the next one can reopen.
+let watchTimer = null;
+function watchViewer() {
+  clearTimeout(watchTimer);
+  watchTimer = setTimeout(() => { if (!viewerOpen() && state.viewerWanted) setViewerState(false, 'lost'); }, 2500);
+}
+
+function setViewerState(open, why) {
+  $('viewerDot').classList.toggle('on', open);
+  const el = $('viewerState');
+  $('bOpen').classList.toggle('attn', !open && state.viewerWanted);
+  if (open) {
+    el.classList.remove('err');
+    el.textContent = state.view === 'popup'
+      ? 'Portfolio window is open. Each rating opens the next portfolio there.'
+      : 'Portfolio tab is open. Each rating opens the next portfolio there.';
+  } else if (why === 'blocked') {
+    el.classList.add('err');
+    el.textContent = 'The browser wants a click: press “Open portfolio” (or O). To skip this step, allow pop-ups for docs.google.com (icon at the right of the address bar → Always allow).';
+    tellVoice('Click “Open portfolio” in the sidebar to show this one.', true);
+  } else if (why === 'lost') {
+    el.classList.remove('err');
+    el.textContent = 'Lost track of the portfolio tab (it was closed, or that site cut the link). The next one opens in a new tab.';
+  } else {
+    el.classList.remove('err');
+    el.textContent = 'Click “Open portfolio” once. After that, every rating opens the next portfolio in the same tab.';
+  }
+}
+
+function openCurrent() {
+  state.viewerWanted = true;
+  const url = currentUrl();
+  const ok = showInViewer(url);
+  if (ok) { try { viewer.focus(); } catch (e) {} }
+  return ok;
+}
+
+function nextLink() {
+  const c = state.current;
+  if (!c || c.links.length < 2) { status(c ? 'They only gave one link.' : 'Nothing open.'); return; }
+  state.linkIndex = (state.linkIndex + 1) % c.links.length;
+  renderLinks();
+  status(`Link ${state.linkIndex + 1} of ${c.links.length}: ${c.links[state.linkIndex].label}`);
+  if (state.viewerWanted) showInViewer(currentUrl());
+}
+
+function setView(v) {
+  if (v === state.view) return;
+  state.view = v;
+  renderView();
+  run('pr_setPref', 'view', v).catch(() => {});
+  // This runs from a click, so the browser lets us reopen in the new style straight away.
+  if (viewerOpen()) {
+    try { viewer.close(); } catch (e) {}
+    viewer = null;
+    openCurrent();
+  }
+}
+
+function renderView() {
+  $('vTab').classList.toggle('on', state.view !== 'popup');
+  $('vPopup').classList.toggle('on', state.view === 'popup');
+}
+
+/* ---------- rendering ---------- */
+function show(info, msg) {
+  state.current = info;
+  state.linkIndex = 0;
+  renderCard();
+  const now = info ? `Now: ${info.name} (#${info.number || '?'}, row ${info.row})` : 'All done in this direction 🎉';
+  let extra = '';
+  if (info && !info.links.length) extra = ' · No portfolio link. Say “N/A” or “skip”.';
+  else if (info && info.links[0].kind === 'instagram') extra = ' · No portfolio link, showing their Instagram.';
+  status((msg ? `${msg} · ${now}` : now) + extra);
+  if (state.viewerWanted) showInViewer(currentUrl());
+}
+
+function renderCard() {
+  $('remaining').textContent = `${state.remaining} left`;
+  $('dirDown').classList.toggle('on', state.dir === 'down');
+  $('dirUp').classList.toggle('on', state.dir === 'up');
+  const c = state.current;
+  document.querySelectorAll('#rate button, #bSkip, #bLink').forEach((b) => { b.disabled = !c; });
+  if (!c) {
+    $('name').textContent = 'All caught up';
+    $('meta').textContent = 'No unreviewed applicants left in this direction.';
+    ['links', 'ptext', 'notes', 'about'].forEach((id) => { $(id).textContent = ''; });
+    $('aboutBox').style.display = 'none';
+    return;
+  }
+  $('name').textContent = c.name;
+  const bits = [];
+  if (c.number) bits.push(`#${c.number}`);
+  bits.push(`Row ${c.row}`);
+  if (c.roles) bits.push(c.roles);
+  if (c.country) bits.push(c.country);
+  if (c.reviewed || c.rating) bits.push(`Reviewed: ${c.reviewed || '–'}${c.rating ? ' · ' + c.rating.trim() : ''}`);
+  $('meta').textContent = bits.join(' · ');
+  renderLinks();
+  // Show the cell's own words when it's more than a bare link (passwords, "see my insta", etc.).
+  const onlyLinks = c.links.length && c.links.every((l) => l.kind === 'link') &&
+    c.portfolio.split(/\s+/).filter(Boolean).length <= c.links.length;
+  $('ptext').textContent = onlyLinks ? '' : (c.portfolio || '(portfolio cell is empty)');
+  $('notes').textContent = c.notes || '';
+  $('about').textContent = c.about || '';
+  $('aboutBox').style.display = c.about ? '' : 'none';
+}
+
+function renderLinks() {
+  const box = $('links');
+  box.innerHTML = '';
+  const c = state.current;
+  if (!c) return;
+  c.links.forEach((l, i) => {
+    const a = document.createElement('a');
+    a.href = l.url;
+    a.textContent = (c.links.length > 1 ? `${i + 1}. ` : '') + l.label;
+    a.title = l.url;
+    if (i === state.linkIndex) a.className = 'cur';
+    a.onclick = (e) => {
+      e.preventDefault();
+      state.linkIndex = i;
+      renderLinks();
+      state.viewerWanted = true;
+      showInViewer(l.url);
+    };
+    box.appendChild(a);
+  });
+  if (c.instagram && !c.links.some((l) => l.url === c.instagram)) {
+    const a = document.createElement('a');
+    a.href = c.instagram;
+    a.textContent = 'Instagram ↗';
+    a.className = 'small';
+    box.appendChild(a);
+  }
+}
+
+function renderChoices() {
+  const box = $('rate');
+  box.innerHTML = '';
+  const colour = { next: 'c-next', good: 'c-good', peak: 'c-peak' };
+  state.choices.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = colour[c.cmd] || '';
+    b.innerHTML = '<span></span><small></small>';
+    b.firstChild.textContent = c.label;
+    b.lastChild.innerHTML = `${i + 1}${c.key ? ' · <kbd>' + c.key + '</kbd>' : ''}`;
+    b.onclick = () => (c.cmd === 'option' ? command('option', c.option) : command(c.cmd));
+    box.appendChild(b);
+  });
+  const na = document.createElement('button');
+  na.className = 'c-na';
+  na.innerHTML = 'N/A<small>No link · <kbd>X</kbd></small>';
+  na.title = 'Reviewed? = No (no portfolio or a broken link)';
+  na.onclick = () => command('na');
+  box.appendChild(na);
+  box.style.gridTemplateColumns = `repeat(${Math.min(4, state.choices.length + 1)}, 1fr)`;
+  renderHelp();
+}
+
+function helpRows() {
+  const say = { next: 'next / “not feeling it”', good: 'good / “not bad”', peak: 'peak' };
+  const rows = state.choices.filter((c) => say[c.cmd]).map((c) => [say[c.cmd], `${c.label}, open the next portfolio`]);
+  rows.push([state.choices.map((c, i) => i + 1).join(' / '), state.choices.map((c, i) => `${i + 1} = ${c.label}`).join(', ')]);
+  rows.push(['N/A', 'Reviewed = No (no portfolio or a broken link), open next']);
+  rows.push(['skip', 'Next portfolio without rating this one']);
+  rows.push(['link', 'Their next link, if they gave several']);
+  rows.push(['open', 'Show this portfolio again']);
+  rows.push(['notes …', 'Add a note (or say “notes”, pause, then the note)']);
+  rows.push(['back', 'Previous applicant, rating unchanged']);
+  rows.push(['undo', 'Revert the last rating and go back']);
+  rows.push(['top / bottom', 'Jump to the first unreviewed applicant from that end']);
+  rows.push(['descending / ascending', 'Work top → bottom / bottom → top']);
+  return rows;
+}
+
+function renderHelp() {
+  const t = $('cmdTable');
+  t.innerHTML = '';
+  helpRows().forEach(([a, b]) => {
+    const tr = t.insertRow();
+    tr.insertCell().textContent = a;
+    tr.insertCell().textContent = b;
+  });
+}
+
+/* ---------- status (also echoed to the voice remote) ---------- */
+function status(msg, isErr) {
+  const s = $('status');
+  s.textContent = msg;
+  s.classList.toggle('err', !!isErr);
+  tellVoice(msg, isErr);
+}
+
+/* ---------- voice remote ---------- */
+const VOICE_ORIGIN = (() => { try { return new URL(CFG.voiceUrl).origin; } catch (e) { return null; } })();
+
+function openVoice() {
+  if (!VOICE_ORIGIN) { status('Set voiceUrl in PR_CONFIG (see README).', true); return; }
+  const W = screen.availWidth || 1400;
+  const L = (screen.availLeft || 0) + Math.max(0, W - 400);
+  const T = screen.availTop || 0;
+  const w = window.open(CFG.voiceUrl, 'prVoiceRemote', `width=380,height=600,left=${L},top=${T}`);
+  if (!w) status('Popup blocked — allow pop-ups for docs.google.com and try again.', true);
+}
+
+function tellVoice(text, isErr) {
+  if (!state.voiceSource) return;
+  try { state.voiceSource.postMessage({ type: 'ar-status', text, isErr: !!isErr }, VOICE_ORIGIN); } catch (e) {}
+}
+
+function ackVoice(source) {
+  try {
+    source.postMessage({
+      type: 'ar-ack',
+      title: $('title').textContent,
+      app: 'portfolio',
+      heading: '🎨 Portfolio voice remote',
+      hint: 'Say “next”, “not bad”, “peak”, “skip”, “N/A” or “notes …”',
+      tip: 'Keep this window beside the portfolio, not behind it. Headphones aren’t needed here.',
+      help: helpRows(),
+    }, VOICE_ORIGIN);
+  } catch (err) {}
+}
+
+window.addEventListener('message', (e) => {
+  if (!VOICE_ORIGIN || e.origin !== VOICE_ORIGIN) return;
+  const d = e.data || {};
+  if (d.type === 'ar-hello') {
+    state.voiceSource = e.source;
+    $('voiceDot').classList.add('on');
+    ackVoice(e.source);
+    return;
+  }
+  if (d.type === 'ar-command' && typeof d.cmd === 'string') {
+    state.voiceSource = e.source;
+    $('voiceDot').classList.add('on');
+    $('heard').textContent = `Heard: “${d.heard || d.cmd}”`;
+    command(d.cmd, d.cmd === 'score' ? d.value : d.text);
+  }
+});
+
+/* ---------- wiring ---------- */
+$('bOpen').onclick = openCurrent;
+$('vTab').onclick = () => setView('tab');
+$('vPopup').onclick = () => setView('popup');
+$('bSkip').onclick = () => command('skip');
+$('bLink').onclick = () => command('link');
+$('bUndo').onclick = () => command('undo');
+$('bBack').onclick = () => command('back');
+$('dirDown').onclick = () => command('down');
+$('dirUp').onclick = () => command('up');
+$('bHere').onclick = () => enqueue(startHere);
+$('bVoice').onclick = openVoice;
+
+function submitNote() {
+  const t = $('noteInput').value.trim();
+  if (!t) return;
+  $('noteInput').value = '';
+  command('note', t);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.matches('textarea, input')) {
+    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'noteInput') { e.preventDefault(); submitNote(); }
+    if (e.key === 'Escape') e.target.blur();
+    return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const map = { n: 'next', g: 'good', p: 'peak', x: 'na', s: 'skip', l: 'link', b: 'back', u: 'undo', o: 'open' };
+  const k = e.key.toLowerCase();
+  if (map[k]) { e.preventDefault(); command(map[k]); }
+  else if (/^[1-9]$/.test(k) && Number(k) <= state.choices.length) { e.preventDefault(); command('score', Number(k)); }
+});
+
+enqueue(async () => {
+  const res = await run('pr_init');
+  state.sheet = res.sheetName;
+  state.dir = res.dir;
+  state.view = res.view;
+  state.remaining = res.remaining;
+  state.choices = res.choices;
+  $('title').textContent = res.title;
+  renderView();
+  renderChoices();
+  show(res.current, res.sheetName);
+});
+</script>
+</body>
+</html>
