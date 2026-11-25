@@ -167,6 +167,7 @@ const cache = new Map();   // Drive fileId -> Promise<audio result>
 let queue = Promise.resolve();
 let token = 0;
 let player = null;
+let yt = null;     // the YouTube player on screen: { frame, state, error }
 
 const $ = (id) => document.getElementById(id);
 
@@ -194,7 +195,7 @@ function command(cmd, arg) {
   // Audio controls run immediately; ratings move on immediately and save in the background;
   // everything else runs in order.
   if (cmd === 'replay') return replay();
-  if (cmd === 'pause') return player && player.pause();
+  if (cmd === 'pause') return pauseMedia();
   if (cmd === 'play') return play();
   if (cmd === 'progress') return sayProgress();
   if (RATE_CMDS[cmd]) return rateNow(cmd, cmd === 'score' ? arg : undefined);
@@ -446,6 +447,7 @@ function renderCard() {
 async function renderMedia(info, my) {
   const box = $('media');
   box.innerHTML = '';
+  yt = null;
   hideTap();
   if (!info) return;
   if (!info.media.length) {
@@ -471,6 +473,10 @@ async function renderMedia(info, my) {
     if (res.mode === 'inline' && res.url) {
       mountPlayer(box, res, my);
       if (res.folderCount > 1) addHint(box, 'From their Drive folder (' + res.folderCount + ' files). Open ↗ for the rest.');
+    } else if (res.fileId && isMedia(res.mime)) {
+      // Too big to send through the script (most WAVs and videos): stream it from Drive instead.
+      mountPlayer(box, { url: streamUrl(res.fileId), mime: res.mime, fileId: res.fileId, streamed: true }, my);
+      if (res.folderCount > 1) addHint(box, 'From their Drive folder (' + res.folderCount + ' files). Open ↗ for the rest.');
     } else if (res.fileId) {
       mountDrivePreview(box, res.fileId, res.folderCount ? 'From their Drive folder' : '');
     } else if (first.folder) {
@@ -479,14 +485,9 @@ async function renderMedia(info, my) {
       mountDrivePreview(box, first.id, res.error ? 'Using Drive’s player' : '');
     }
   } else {
-    const yt = youTubeId(first.url);
-    if (yt) {
-      const f = document.createElement('iframe');
-      // Plain quotes, not backticks: HtmlService cuts "//" inside backticks (see tests/harness/htmlservice.mjs).
-      f.src = 'https://www.youtube.com/embed/' + yt + '?autoplay=1';
-      f.height = 170;
-      f.allow = 'autoplay; encrypted-media';
-      box.appendChild(f);
+    const ytId = youTubeId(first.url);
+    if (ytId) {
+      mountYouTube(box, ytId, my);
     } else {
       const b = document.createElement('a');
       b.href = first.url;
@@ -498,15 +499,20 @@ async function renderMedia(info, my) {
 }
 
 function mountPlayer(box, res, my) {
-  const el = document.createElement(res.mime.indexOf('video/') === 0 ? 'video' : 'audio');
+  const warm = res.streamed ? takeWarm(res.fileId) : null;
+  const el = warm || document.createElement(res.mime.indexOf('video/') === 0 ? 'video' : 'audio');
   el.controls = true;
   el.preload = 'auto';
-  el.src = res.url;
-  el.onerror = () => {
+  if (!warm) el.src = res.url;
+  const fail = () => {
     if (my !== token) return;
     box.innerHTML = '';
-    mountDrivePreview(box, res.fileId || res.id, 'Couldn’t play inline — using Drive’s player');
+    mountDrivePreview(box, res.fileId || res.id, res.streamed
+      ? 'Couldn’t stream it here (this browser may block Google’s sign-in inside the sidebar), so it’s in Drive’s player: press ▶'
+      : 'Couldn’t play inline — using Drive’s player');
   };
+  el.onerror = fail;
+  if (warm && warm.error) { fail(); return; }
   box.appendChild(el);
   player = el;
   play();
@@ -539,12 +545,23 @@ function mountDrivePreview(box, id, note) {
 }
 
 function play() {
-  if (!player) return;
+  if (!player) { if (yt) ytCommand('playVideo'); return; }
   const p = player.play();
   if (p && p.catch) p.then(hideTap).catch(showTap);
 }
-function replay() { if (player) { player.currentTime = 0; play(); } }
-function stopMedia() { if (player) { try { player.pause(); } catch (e) {} } player = null; }
+function replay() {
+  if (player) { player.currentTime = 0; play(); }
+  else if (yt) { ytCommand('seekTo', [0, true]); ytCommand('playVideo'); }
+}
+function pauseMedia() {
+  if (player) player.pause();
+  else if (yt) ytCommand('pauseVideo');
+}
+function stopMedia() {
+  if (player) { try { player.pause(); } catch (e) {} }
+  player = null;
+  if (yt) { ytCommand('pauseVideo'); yt = null; }
+}
 function showTap() { $('tap').style.display = 'block'; }
 function hideTap() { $('tap').style.display = 'none'; }
 
@@ -578,8 +595,96 @@ function trimCache() {
 // Load the next audition's audio in advance, so it plays the moment you rate.
 function preload(info) {
   const d = info && info.media.find((m) => m.kind === 'drive');
-  if (d) loadDrive(d.id);
+  if (!d) return;
+  loadDrive(d.id).then((res) => {
+    if (res && res.mode !== 'inline' && res.fileId && isMedia(res.mime)) warmStream(res);
+  });
 }
+
+/* ---------- big Drive files: streamed straight from Drive ---------- */
+// Files too big to pass through the script play from Drive's download address in our own player,
+// using the browser's Google sign-in, so they autoplay like small ones. If the browser won't send
+// that sign-in (Incognito, blocked third-party cookies), the player errors and Drive's own player is
+// used instead, as before.
+// Not a regex: HtmlService would cut the "//" in /^(audio|video)\//.
+function isMedia(mime) {
+  return /^(audio|video)[/]/.test(mime || '');
+}
+
+function streamUrl(id) {
+  return 'https://drive.usercontent.google.com/download?id=' + encodeURIComponent(id) + '&export=download&confirm=t';
+}
+
+const warmed = new Map(); // fileId -> media element already buffering the next audition
+function warmStream(res) {
+  if (warmed.has(res.fileId)) return;
+  const el = document.createElement(res.mime.indexOf('video/') === 0 ? 'video' : 'audio');
+  el.preload = 'auto';
+  el.src = streamUrl(res.fileId);
+  warmed.set(res.fileId, el);
+  while (warmed.size > 2) {
+    const [id, old] = warmed.entries().next().value;
+    warmed.delete(id);
+    try { old.removeAttribute('src'); old.load(); } catch (e) {}
+  }
+}
+function takeWarm(id) {
+  const el = warmed.get(id);
+  if (el) warmed.delete(id);
+  return el || null;
+}
+
+/* ---------- YouTube ---------- */
+// The embed autoplays when the browser allows it. The sidebar also talks to YouTube's player
+// (postMessage API): a video that hasn't started gets a play command, voice play / pause / replay
+// work, and a video whose owner blocked embedding says so instead of sitting there.
+const YT_ORIGIN = 'https://www.youtube.com';
+
+function mountYouTube(box, id, my) {
+  const f = document.createElement('iframe');
+  // Plain quotes, not backticks: HtmlService cuts "//" inside backticks (see tests/harness/htmlservice.mjs).
+  f.src = 'https://www.youtube.com/embed/' + id + '?autoplay=1&enablejsapi=1&playsinline=1&rel=0&origin=' + encodeURIComponent(location.origin);
+  f.height = 200; // YouTube won't play embeds smaller than 200px
+  f.allow = 'autoplay; encrypted-media; picture-in-picture';
+  // YouTube refuses embeds that don't say which page they're on (its "error 153").
+  f.referrerPolicy = 'strict-origin-when-cross-origin';
+  const me = { frame: f, state: -1, error: null };
+  yt = me;
+  f.addEventListener('load', () => ytPost(me, { event: 'listening', id: 1, channel: 'widget' }));
+  box.appendChild(f);
+  const going = () => me.state === 1 || me.state === 3 || me.state === 2 || me.state === 0;
+  setTimeout(() => { if (yt === me && !going() && me.error === null) ytCommand('playVideo'); }, 2500);
+  setTimeout(() => {
+    if (yt === me && my === token && !going() && me.error === null) {
+      status('The YouTube video is waiting for a click: press ▶ on it.', true, { say: 'Press play on the YouTube video.' });
+    }
+  }, 7000);
+}
+
+function ytPost(me, msg) {
+  try { me.frame.contentWindow.postMessage(JSON.stringify(msg), YT_ORIGIN); } catch (e) {}
+}
+function ytCommand(func, args) {
+  if (yt) ytPost(yt, { event: 'command', func, args: args || [] });
+}
+
+window.addEventListener('message', (e) => {
+  if (e.origin !== YT_ORIGIN || !yt || e.source !== yt.frame.contentWindow) return;
+  let d = e.data;
+  try { if (typeof d === 'string') d = JSON.parse(d); } catch (err) { return; }
+  if (!d) return;
+  if (d.event === 'onStateChange' && typeof d.info === 'number') yt.state = d.info;
+  if (d.event === 'infoDelivery' && d.info && typeof d.info.playerState === 'number') yt.state = d.info.playerState;
+  if (d.event === 'onError' && yt.error === null) {
+    yt.error = d.info;
+    const blocked = d.info === 101 || d.info === 150;
+    const gone = d.info === 100;
+    const msg = blocked ? 'This YouTube video’s owner doesn’t allow it to play inside other pages. Use “Open ↗” to watch it on YouTube.'
+      : gone ? 'This YouTube video is private or was removed.'
+      : 'YouTube wouldn’t play this one here (error ' + d.info + '). Use “Open ↗” to watch it on YouTube.';
+    status(msg, true, { say: blocked ? 'This video can only play on YouTube. Use the open link.' : gone ? 'This YouTube video is private or removed.' : 'YouTube would not play this one here.' });
+  }
+});
 
 function b64ToBlob(b64, mime) {
   const bin = atob(b64);
@@ -589,9 +694,9 @@ function b64ToBlob(b64, mime) {
 }
 
 function youTubeId(url) {
-  const m = url.match(/youtu\.be\/([\w-]{11})/) ||
-            url.match(/youtube\.com\/.*[?&]v=([\w-]{11})/) ||
-            url.match(/youtube\.com\/(?:shorts|embed|live)\/([\w-]{11})/);
+  const m = url.match(/youtu\.be\/([\w-]{11})/i) ||
+            url.match(/youtube\.com\/.*[?&]v=([\w-]{11})/i) ||
+            url.match(/youtube\.com\/(?:shorts|embed|live)\/([\w-]{11})/i);
   return m ? m[1] : null;
 }
 
