@@ -17,6 +17,10 @@
     #mic.live { background: var(--bad); }
     .meter { height: 8px; margin-top: 10px; background: #eceff1; border-radius: 4px; overflow: hidden; }
     #level { height: 100%; width: 0; background: var(--ok); transition: width .08s linear; }
+    #recState { margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+    #recState.rec-ok { color: #137333; }
+    #recState.rec-warn { color: #b06000; }
+    #diagLog { max-height: 200px; overflow: auto; font: 11px/1.4 ui-monospace, monospace; background: #f6f8fa; padding: 8px; border-radius: 8px; white-space: pre-wrap; }
     #problem { display: none; margin-top: 10px; padding: 10px; border-radius: 10px; background: #fdecea; color: var(--bad); }
     .box { margin-top: 12px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; min-height: 22px; }
     #live { color: var(--muted); font-style: italic; }
@@ -37,6 +41,7 @@
   <div class="row"><span class="dot" id="connDot"></span><span id="conn">Connecting to the sidebar…</span></div>
 
   <button id="mic">Start listening</button>
+  <div id="recState" class="rec-off">Not listening</div>
   <div class="meter" title="Microphone level"><div id="level"></div></div>
   <div class="muted" id="micName" style="margin-top:4px">Mic level shows here while listening.</div>
   <label class="row muted" style="margin-top:8px">Microphone
@@ -69,6 +74,13 @@
       <tr><td>undo</td><td>Revert the last rating</td></tr>
       <tr><td>replay / pause / play</td><td>Audio controls</td></tr>
     </table>
+  </details>
+
+  <details>
+    <summary>Diagnostics</summary>
+    <div class="muted" style="margin:6px 0">What the mic and voice recognition have been doing. If listening stops, copy this and send it over.</div>
+    <button id="copyLog" type="button">Copy log</button>
+    <pre id="diagLog"></pre>
   </details>
 
   <details>
@@ -345,21 +357,24 @@ function speak(text) {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'en-US';
     u.rate = 1.1;
+    const token = ++speakToken;
+    const done = () => { if (token === speakToken) holdRec(false); };
     holdRec(true);
-    u.onend = u.onerror = () => holdRec(false);
-    setTimeout(() => holdRec(false), 9000);
+    u.onend = u.onerror = done;
+    setTimeout(done, 9000);
     speechSynthesis.speak(u);
   } catch (e) {
     holdRec(false);
   }
 }
+let speakToken = 0;
 function holdRec(on) {
   if (on) {
     holdForSpeech = true;
-    if (rec && listening) { try { rec.abort(); } catch (e) {} }
+    if (rec && listening && (recRunning || starting)) { try { rec.abort(); } catch (e) {} }
   } else if (holdForSpeech) {
     holdForSpeech = false;
-    if (rec && listening) setTimeout(startRec, 150);
+    if (rec && listening) scheduleRestart(150);
   }
 }
 
@@ -462,9 +477,15 @@ async function startMeter() {
   }
   refreshMics(); // names become visible once the mic is allowed
   const track = meterStream.getAudioTracks()[0];
+  window.__mic = () => track;
   const label = (track && track.label) || 'default microphone';
   $('micName').textContent = 'Mic: ' + label;
-  if (track) track.onended = () => { if (listening) showProblem('The microphone was disconnected. ' + MIC_PICK); };
+  if (track) track.onended = () => {
+    if (!listening) return;
+    log('mic disconnected');
+    showProblem('The microphone was disconnected. Trying to reconnect… ' + MIC_PICK);
+    reopenMic();
+  };
 
   meterCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (meterCtx.state === 'suspended') meterCtx.resume().catch(() => {});
@@ -502,7 +523,34 @@ function stopMeter() {
 }
 
 /* ---------- speech recognition ---------- */
+// Chrome ends recognition on its own all the time: after silence, after about a minute, when its
+// connection to Google's speech service blips ("network"), or when the mic sleeps or is re-plugged.
+// Everything here is about starting it again by itself, and saying so when it can't.
+const TIMING = Object.assign({ check: 3000, quiet: 90000, stuck: 10000 }, window.__voiceTiming || {});
 let noSpeechCount = 0;
+let recRunning = false;   // between onstart and onend
+let starting = false;     // start() called, onstart not yet
+let everStarted = false;  // recognition has worked since "Start listening" was pressed
+let failStreak = 0;       // errors in a row with nothing heard in between
+let restartTimer = null;
+let lastStartTry = 0;
+let lastEventAt = 0;
+let sessionStart = 0;     // when the current session started
+let sessionError = false; // whether it hit a real error
+let watchdog = null;
+
+/* ---------- diagnostics log ---------- */
+const LOG = [];
+function log(what) {
+  LOG.push(new Date().toTimeString().slice(0, 8) + '  ' + what);
+  if (LOG.length > 80) LOG.shift();
+  const el = $('diagLog');
+  if (el) el.textContent = LOG.slice().reverse().join('\n');
+}
+function setRecState(text, kind) {
+  $('recState').textContent = text;
+  $('recState').className = 'rec-' + kind;
+}
 
 async function startListening() {
   showProblem(browserProblem());
@@ -512,75 +560,225 @@ async function startListening() {
   $('mic').disabled = true;
   const micOk = await startMeter();
   $('mic').disabled = false;
-  if (!micOk) return;
+  if (!micOk) { log('could not open the mic'); return; }
   if (!SR) return; // the problem box already explains; the level bar still shows the mic works
 
-  rec = new SR();
-  rec.lang = 'en-US';
-  rec.continuous = true;
-  rec.interimResults = true;
-  rec.maxAlternatives = 3;
+  listening = true;
+  everStarted = false;
+  failStreak = 0;
+  noSpeechCount = 0;
+  log('start listening (' + $('micName').textContent.replace(/^Mic: /, '') + ')');
+  setRecState('🟡 Starting…', 'warn');
+  makeRec();
+  startRec();
+  clearInterval(watchdog);
+  watchdog = setInterval(checkAlive, TIMING.check);
+  updateMic();
+}
 
-  rec.onresult = (e) => {
+// A fresh recognizer. Events from older ones (after we replace them) are ignored.
+function makeRec() {
+  const r = new SR();
+  r.lang = 'en-US';
+  r.continuous = true;
+  r.interimResults = true;
+  r.maxAlternatives = 3;
+  const mine = () => r === rec;
+
+  r.onstart = () => {
+    if (!mine()) return;
+    recRunning = true;
+    starting = false;
+    everStarted = true;
+    lastEventAt = sessionStart = Date.now();
+    sessionError = false;
+    log('listening');
+    setRecState('🟢 Listening', 'ok');
+  };
+  r.onaudiostart = r.onsoundstart = r.onspeechstart = () => { if (mine()) lastEventAt = Date.now(); };
+  r.onresult = (e) => {
+    if (!mine()) return;
+    lastEventAt = Date.now();
     noSpeechCount = 0;
+    if (failStreak) { failStreak = 0; setRecState('🟢 Listening', 'ok'); }
     if (!browserProblem()) showProblem('');
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      const r = e.results[i];
-      if (r.isFinal) handleUtterance(Array.from(r, (a) => a.transcript));
-      else interim += r[0].transcript;
+      const res = e.results[i];
+      if (res.isFinal) handleUtterance(Array.from(res, (a) => a.transcript));
+      else interim += res[0].transcript;
     }
     $('live').textContent = interim;
   };
-  rec.onerror = (e) => {
-    if (e.error === 'aborted') return;
-    if (e.error === 'no-speech') {
-      noSpeechCount++;
-      if (noSpeechCount >= 3 && peakLevel >= 2) {
-        showProblem('The mic hears sound but no words. Speak a little closer to the mic, or check the right mic is selected. ' + MIC_PICK);
-      }
+  r.onerror = (e) => { if (mine()) recError(e.error); };
+  r.onend = () => {
+    if (!mine()) return;
+    recRunning = false;
+    starting = false;
+    // A session that ran a while without errors means things are healthy again: retry quickly from now on.
+    if (failStreak && !sessionError && sessionStart && Date.now() - sessionStart > 5000) {
+      log('working normally again');
+      failStreak = 0;
+      if (!browserProblem()) showProblem('');
+    }
+    sessionStart = 0;
+    if (!listening) { updateMic(); return; }
+    if (holdForSpeech) return; // speaking; restarts when done
+    setRecState(failStreak ? $('recState').textContent : '🟡 Restarting…', 'warn');
+    scheduleRestart(restartDelay());
+  };
+  rec = r;
+}
+
+function recError(code) {
+  lastEventAt = Date.now();
+  starting = false;
+  if (code === 'aborted') return; // we did that on purpose
+  if (code === 'no-speech') {
+    noSpeechCount++;
+    if (noSpeechCount >= 3 && peakLevel >= 2) {
+      showProblem('The mic hears sound but no words. Speak a little closer to the mic, or check the right mic is selected. ' + MIC_PICK);
+    }
+    return;
+  }
+  failStreak++;
+  sessionError = true;
+  log('error: ' + code + (failStreak > 1 ? ' (' + failStreak + ' in a row)' : ''));
+  if (code === 'language-not-supported') {
+    showProblem(speechErrorText(code));
+    stopListening(true);
+    return;
+  }
+  if (code === 'not-allowed' || code === 'service-not-allowed') {
+    // Never worked: the mic really is blocked. Worked before: probably a blip, so keep trying for a bit.
+    if (!everStarted || failStreak > 6) {
+      showProblem(speechErrorText(code));
+      stopListening(true);
       return;
     }
-    showProblem(speechErrorText(e.error));
-    if (e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'network' || e.error === 'language-not-supported') {
-      stopListening(true);
-    }
-  };
-  // Chrome stops recognising after a while; restart automatically.
-  rec.onend = () => {
-    if (listening && !holdForSpeech) setTimeout(startRec, 250);
-    else if (!listening) updateMic();
-  };
+  }
+  if (code === 'network') {
+    setRecState('🟡 Reconnecting to Google’s voice service… (try ' + failStreak + ')', 'warn');
+    if (failStreak >= 4) showProblem(speechErrorText(code) + ' Still trying to reconnect…');
+  } else if (code === 'audio-capture') {
+    // Only reopen the mic if it really dropped; otherwise just try recognition again.
+    const t = meterStream && meterStream.getAudioTracks()[0];
+    const dropped = !t || t.readyState !== 'live';
+    setRecState(dropped ? '🟡 Lost the mic, reconnecting…' : '🟡 Restarting… (audio-capture)', 'warn');
+    if (failStreak >= 3) showProblem(speechErrorText(code));
+    if (dropped) reopenMic();
+  } else {
+    setRecState('🟡 Restarting… (' + code + ')', 'warn');
+    if (failStreak >= 4) showProblem(speechErrorText(code) + ' Still retrying…');
+  }
+  // Chrome sends onend next, which schedules the retry (the watchdog covers it if it doesn't).
+}
 
-  listening = true;
-  noSpeechCount = 0;
-  startRec();
-  updateMic();
+// Quick after a normal end; waits longer each time it fails in a row (0.5s, 1s, 2s … up to 15s).
+function restartDelay() {
+  return failStreak ? Math.min(15000, 500 * Math.pow(2, failStreak - 1)) : 250;
+}
+
+function scheduleRestart(ms) {
+  if (restartTimer || !listening) return;
+  restartTimer = setTimeout(() => { restartTimer = null; startRec(); }, ms);
 }
 
 // Listen through the chosen mic when one is picked, otherwise the default mic.
 function startRec() {
+  if (!listening || holdForSpeech || !rec || recRunning || starting) return;
+  clearTimeout(restartTimer);
+  restartTimer = null;
+  lastStartTry = Date.now();
   const track = meterStream && meterStream.getAudioTracks()[0];
   const useTrack = !!($('micSelect').value && track && track.readyState === 'live' && canUseChosenMic());
+  starting = true;
   try {
     if (useTrack) rec.start(track); else rec.start();
+    return;
   } catch (err) {
-    if (useTrack && err && err.name !== 'InvalidStateError') {
-      try { rec.start(); } catch (e) {}
-      showProblem('This browser can only listen through the default mic. Update Chrome or Edge, or make your mic the default in Chrome: Settings → Privacy and security → Site settings → Microphone.');
+    starting = false;
+    const name = (err && (err.name || err.message)) || 'unknown';
+    if (name === 'InvalidStateError') {
+      // Chrome thinks the old one is still going: replace it with a fresh recognizer.
+      log('start refused (still busy), using a fresh recognizer');
+      try { rec.abort(); } catch (e) {}
+      makeRec();
+      scheduleRestart(300);
+      return;
     }
+    if (useTrack) {
+      showProblem('This browser can only listen through the default mic. Update Chrome or Edge, or make your mic the default in Chrome: Settings → Privacy and security → Site settings → Microphone.');
+      try { starting = true; rec.start(); return; } catch (e) { starting = false; }
+    }
+    failStreak++;
+    log('start failed: ' + name + ', retrying');
+    setRecState('🟡 Restarting…', 'warn');
+    scheduleRestart(restartDelay());
   }
+}
+
+// Every few seconds: make sure something is actually listening.
+function checkAlive() {
+  if (!listening || holdForSpeech) return;
+  const now = Date.now();
+  if (starting && now - lastStartTry > TIMING.stuck) {
+    log('watchdog: start never finished, using a fresh recognizer');
+    starting = false;
+    try { rec.abort(); } catch (e) {}
+    makeRec();
+    startRec();
+  } else if (!recRunning && !starting && !restartTimer && now - lastStartTry > TIMING.check) {
+    log('watchdog: not listening, restarting');
+    startRec();
+  } else if (recRunning && now - lastEventAt > TIMING.quiet) {
+    // Chrome sometimes goes quiet without ever ending. Nudge it; onend restarts it.
+    log('watchdog: no activity for ' + Math.round(TIMING.quiet / 1000) + 's, restarting');
+    lastEventAt = now;
+    try { rec.abort(); } catch (e) {}
+  }
+}
+
+// The mic went away (unplugged, Bluetooth asleep, another app grabbed it): open it again.
+let reopening = false;
+async function reopenMic() {
+  if (reopening || !listening) return;
+  reopening = true;
+  log('reopening the mic');
+  stopMeter();
+  await new Promise((r) => setTimeout(r, 800));
+  const ok = listening && (await startMeter());
+  reopening = false;
+  if (!listening) return;
+  if (!ok) {
+    log('mic not back yet, trying again in 5s');
+    setTimeout(reopenMic, 5000);
+    return;
+  }
+  log('mic reopened (' + $('micName').textContent.replace(/^Mic: /, '') + ')');
+  if (!browserProblem()) showProblem('');
+  // Restart recognition so it uses the reopened mic.
+  if (recRunning || starting) { try { rec.abort(); } catch (e) {} } else startRec();
 }
 
 function stopListening(keepProblem) {
   listening = false;
+  clearInterval(watchdog);
+  clearTimeout(restartTimer);
+  restartTimer = null;
   endNoteMode();
   endCustomMode();
   endAskMode();
-  if (rec) try { rec.stop(); } catch (err) {}
+  const r = rec;
+  rec = null;
+  recRunning = false;
+  starting = false;
+  if (r) try { r.stop(); } catch (err) {}
   stopMeter();
   $('live').textContent = '';
   if (!keepProblem) showProblem(browserProblem());
+  log('stopped listening');
+  setRecState('Not listening', 'off');
   updateMic();
 }
 
@@ -631,7 +829,24 @@ $('micSelect').onchange = () => {
   if (listening) { stopListening(); startListening(); }
 };
 refreshMics();
-if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', refreshMics);
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    refreshMics();
+    const t = meterStream && meterStream.getAudioTracks()[0];
+    if (listening && (!t || t.readyState !== 'live')) reopenMic();
+  });
+}
+window.addEventListener('online', () => {
+  log('back online');
+  if (listening) { failStreak = 0; startRec(); }
+});
+window.addEventListener('offline', () => log('went offline'));
+$('copyLog').onclick = async () => {
+  const text = 'Voice remote log (' + navigator.userAgent + ')\n' + LOG.join('\n');
+  try { await navigator.clipboard.writeText(text); $('copyLog').textContent = 'Copied ✓'; }
+  catch (e) { $('copyLog').textContent = 'Select the log and copy it'; }
+  setTimeout(() => { $('copyLog').textContent = 'Copy log'; }, 2000);
+};
 $('test').addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   handleUtterance([e.target.value]);
@@ -640,7 +855,8 @@ $('test').addEventListener('keydown', (e) => {
 
 // If Chrome paused listening while this window was hidden, pick up again when it's back.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && listening && rec && !holdForSpeech) startRec();
+  log('window ' + document.visibilityState);
+  if (document.visibilityState === 'visible' && listening && !holdForSpeech) startRec();
 });
 
 hello();
