@@ -133,6 +133,18 @@
   </details>
 
 <script>
+/* Shows a script error in the sidebar instead of leaving it stuck on "Loading…". */
+(function () {
+  function show(msg) {
+    var s = document.getElementById('status');
+    var t = document.getElementById('title');
+    if (s) { s.textContent = 'Sidebar error: ' + msg + ' Close and reopen the sidebar; if it keeps happening, send this message to David.'; s.className = 'err'; }
+    if (t && /Loading/.test(t.textContent)) t.textContent = 'Couldn\u2019t start';
+  }
+  window.addEventListener('error', function (e) { show((e.message || 'error') + (e.lineno ? ' (line ' + e.lineno + ')' : '')); });
+})();
+</script>
+<script>
 const CFG = <?!= clientConfig ?>;
 
 const state = {
@@ -470,7 +482,8 @@ async function renderMedia(info, my) {
     const yt = youTubeId(first.url);
     if (yt) {
       const f = document.createElement('iframe');
-      f.src = `https://www.youtube.com/embed/${yt}?autoplay=1`;
+      // Plain quotes, not backticks: HtmlService cuts "//" inside backticks (see tests/harness/htmlservice.mjs).
+      f.src = 'https://www.youtube.com/embed/' + yt + '?autoplay=1';
       f.height = 170;
       f.allow = 'autoplay; encrypted-media';
       box.appendChild(f);
@@ -519,7 +532,7 @@ function mountDrivePreview(box, id, note) {
   player = null;
   if (note) addHint(box, note);
   const f = document.createElement('iframe');
-  f.src = `https://drive.google.com/file/d/${id}/preview`;
+  f.src = 'https://drive.google.com/file/d/' + id + '/preview';
   f.height = 140;
   f.allow = 'autoplay';
   box.appendChild(f);
