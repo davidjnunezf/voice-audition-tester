@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Portfolio Reviewer</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7f9;
+           font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: #1f2328; }
+    main { max-width: 640px; margin: 24px; padding: 32px; background: #fff; border-radius: 16px;
+           box-shadow: 0 1px 3px rgba(0, 0, 0, .08); }
+    h1 { font-size: 24px; margin: 0 0 12px; }
+    blockquote { margin: 16px 0; padding: 12px 16px; background: #fff8e1; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
+    .muted { color: #6b7280; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="head">No portfolio link</h1>
+    <blockquote id="text" hidden></blockquote>
+    <p class="muted" id="hint">Say “N/A” or “skip”, or rate them from what they wrote.</p>
+  </main>
+<script>
+// Everything shown here comes after the "#" in the address, which browsers never send to a server.
+(function () {
+  var data = {};
+  function render() {
+    try { data = JSON.parse(decodeURIComponent(location.hash.slice(1))) || {}; } catch (e) { data = {}; }
+    var head = document.getElementById('head');
+    var text = document.getElementById('text');
+    var hint = document.getElementById('hint');
+    if (data.done) {
+      head.textContent = 'All caught up 🎉';
+      text.hidden = true;
+      hint.textContent = 'No unreviewed applicants left in this direction.';
+      document.title = 'All caught up';
+      return;
+    }
+    head.textContent = (data.name || 'This applicant') + ' didn’t give a portfolio link';
+    document.title = 'No link · ' + (data.name || 'applicant');
+    text.hidden = !data.text;
+    text.textContent = data.text ? 'They wrote: “' + data.text + '”' : '';
+    hint.textContent = 'Say “N/A” or “skip”, or rate them from what they wrote.';
+  }
+  window.addEventListener('hashchange', render);
+  render();
+})();
+</script>
+</body>
+</html>
