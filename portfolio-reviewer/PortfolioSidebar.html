@@ -156,12 +156,17 @@ function run(fn, ...args) {
   });
 }
 function enqueue(task) {
-  queue = queue.then(task).catch((err) => status((err && err.message) || String(err), true));
+  queue = queue.then(task).catch((err) => {
+    const msg = (err && err.message) || String(err);
+    // Say short problems out loud (the reviewer is looking at the portfolio, not the sidebar).
+    status(msg, true, { say: msg.length <= 110 ? msg : 'Something went wrong. Check the sidebar.' });
+  });
   return queue;
 }
 
 /* ---------- commands (buttons, keys and voice all land here) ---------- */
-function command(cmd, arg, tab) {
+// tab: a tab name from the Add to buttons. answer: the voice remote sent this as the answer to a question.
+function command(cmd, arg, tab, answer) {
   // Window controls run straight away; everything that touches the sheet runs in order.
   if (cmd === 'open' || cmd === 'replay' || cmd === 'play') return openCurrent();
   if (cmd === 'link') return nextLink();
@@ -171,8 +176,8 @@ function command(cmd, arg, tab) {
       case 'next': case 'good': case 'peak': case 'excellent': case 'na': return rate(cmd);
       case 'score': case 'option': return rate(cmd, arg);
       case 'skip': return skip();
-      case 'addto': return addTo(arg, tab);
-      case 'removefrom': return removeFrom(arg, tab);
+      case 'addto': return addTo(arg, tab, answer);
+      case 'removefrom': return removeFrom(arg, tab, answer);
       case 'note': return addNote(arg);
       case 'undo': return undo();
       case 'back': return back();
@@ -227,21 +232,42 @@ function tabKey(text) {
 // "character" → Character Design, "vis dev" → Visdev, "2D animation" → 2D ANIM …
 function matchTab(text) {
   const k = tabKey(text).replace(/^the/, '').replace(/(?:tabs?|sheet)$/, '');
-  if (!k) return { err: 'Say which tab, e.g. “add to layout”.' };
+  if (!k) return { err: 'Say which tab, e.g. “add to layout”.', say: 'Which tab?', ask: true };
   const all = state.tabs.map((t) => ({ t, k: tabKey(t) }));
   let hits = all.filter((x) => x.k === k);
   if (!hits.length) hits = all.filter((x) => x.k.indexOf(k) === 0);
   if (!hits.length && k.length >= 4) hits = all.filter((x) => x.k.indexOf(k) !== -1 || k.indexOf(x.k) === 0);
   if (hits.length === 1) return { tab: hits[0].t };
-  if (hits.length > 1) return { err: `Which tab: ${hits.map((h) => h.t).join(', ')}?` };
-  return { err: `No tab called “${text}”. Tabs: ${state.tabs.join(', ') || 'none found'}.` };
+  if (hits.length > 1) {
+    const names = hits.map((h) => h.t);
+    return { err: `Which tab: ${names.join(', ')}?`, say: `Which one: ${spokenList(names)}?`, ask: true, prompt: `Which one? ${names.join(' · ')}` };
+  }
+  return {
+    err: `No tab called “${text}”. Tabs: ${state.tabs.join(', ') || 'none found'}.`,
+    say: `I don't know a tab called ${text}. Which tab?`, ask: true, prompt: `Which tab? ${state.tabs.join(' · ')}`,
+  };
 }
 
-async function addTo(text, tabName) {
+function spokenList(names) {
+  const n = names.map((x) => x.toLowerCase().replace(/\b2d\b/, '2D'));
+  return n.length > 1 ? n.slice(0, -1).join(', ') + ', or ' + n[n.length - 1] : n[0];
+}
+
+// A tab name we couldn't place: ask out loud, and let the next thing said be the answer.
+// If this already was an answer, say so once and stop, so stray talk can't keep it asking.
+function askTab(cmd, m, answer) {
+  if (answer) {
+    status(m.err, true, { say: 'Still not sure which tab. Try again, like add to layout.' });
+    return;
+  }
+  status(m.err, true, { say: m.say, ask: m.ask ? { cmd, prompt: m.prompt || 'Which tab?' } : null });
+}
+
+async function addTo(text, tabName, answer) {
   const cur = state.current;
   if (!cur) throw new Error('Nothing open.');
   const m = tabName ? { tab: tabName } : matchTab(text);
-  if (m.err) throw new Error(m.err);
+  if (m.err) return askTab('addto', m, answer);
   if (state.done.indexOf(m.tab) !== -1) { status(`${cur.name} is already in ${m.tab}.`); return; }
   if (!cur.reviewed) {
     // Not rated yet: copy when they are, so the copy has the rating in it.
@@ -257,9 +283,9 @@ async function addTo(text, tabName) {
   status(`Added ${cur.name}${addedText(res.added).replace(' · added', '')}`);
 }
 
-function removeFrom(text, tabName) {
+function removeFrom(text, tabName, answer) {
   const m = tabName ? { tab: tabName } : matchTab(text);
-  if (m.err) throw new Error(m.err);
+  if (m.err) return askTab('removefrom', m, answer);
   if (state.pending.indexOf(m.tab) !== -1) {
     state.pending = state.pending.filter((t) => t !== m.tab);
     renderTabs();
@@ -456,7 +482,7 @@ function setViewerState(open, why) {
   } else if (why === 'blocked') {
     el.classList.add('err');
     el.textContent = 'The browser wants a click: press “Open portfolio” (or O). To skip this step, allow pop-ups for docs.google.com (icon at the right of the address bar → Always allow).';
-    tellVoice('Click “Open portfolio” in the sidebar to show this one.', true);
+    tellVoice('Click “Open portfolio” in the sidebar to show this one.', true, { say: 'Click open portfolio in the sidebar to show this one.' });
   } else if (why === 'lost') {
     el.classList.remove('err');
     el.textContent = 'Lost track of the portfolio tab (it was closed, or that site cut the link). The next one opens in a new tab.';
@@ -631,11 +657,11 @@ function renderHelp() {
 }
 
 /* ---------- status (also echoed to the voice remote) ---------- */
-function status(msg, isErr) {
+function status(msg, isErr, extra) {
   const s = $('status');
   s.textContent = msg;
   s.classList.toggle('err', !!isErr);
-  tellVoice(msg, isErr);
+  tellVoice(msg, isErr, extra);
 }
 
 /* ---------- voice remote ---------- */
@@ -650,9 +676,12 @@ function openVoice() {
   if (!w) status('Popup blocked — allow pop-ups for docs.google.com and try again.', true);
 }
 
-function tellVoice(text, isErr) {
+// extra: { say: 'words to speak', ask: { cmd, prompt } to take the next thing said as the answer, tone: 'error' }
+function tellVoice(text, isErr, extra) {
   if (!state.voiceSource) return;
-  try { state.voiceSource.postMessage({ type: 'ar-status', text, isErr: !!isErr }, VOICE_ORIGIN); } catch (e) {}
+  const msg = Object.assign({ type: 'ar-status', text, isErr: !!isErr }, extra || {});
+  if (!msg.ask) delete msg.ask;
+  try { state.voiceSource.postMessage(msg, VOICE_ORIGIN); } catch (e) {}
 }
 
 function ackVoice(source) {
@@ -682,7 +711,7 @@ window.addEventListener('message', (e) => {
     state.voiceSource = e.source;
     $('voiceDot').classList.add('on');
     $('heard').textContent = `Heard: “${d.heard || d.cmd}”`;
-    command(d.cmd, d.cmd === 'score' ? d.value : d.text);
+    command(d.cmd, d.cmd === 'score' ? d.value : d.text, null, !!d.answer);
   }
 });
 
