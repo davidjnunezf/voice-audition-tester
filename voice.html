@@ -33,7 +33,7 @@
   </style>
 </head>
 <body>
-  <h1>🎙️ Audition voice remote</h1>
+  <h1 id="heading">🎙️ Audition voice remote</h1>
   <div class="row"><span class="dot" id="connDot"></span><span id="conn">Connecting to the sidebar…</span></div>
 
   <button id="mic">Start listening</button>
@@ -43,7 +43,7 @@
     <select id="micSelect" style="flex:1; min-width:0; padding:6px; font:inherit; border:1px solid var(--line); border-radius:8px"></select>
   </label>
   <div id="problem"></div>
-  <div class="muted" style="margin-top:6px">Wear headphones so the mic doesn’t pick up the auditions. Keep this window open and visible.</div>
+  <div class="muted" id="tip" style="margin-top:6px">Wear headphones so the mic doesn’t pick up the auditions. Keep this window open and visible.</div>
 
   <div id="noteMode">📝 Listening for your note…</div>
   <div class="box" id="live"></div>
@@ -54,7 +54,7 @@
 
   <details>
     <summary>Commands</summary>
-    <table>
+    <table id="help">
       <tr><td>next</td><td>1, open next</td></tr>
       <tr><td>good</td><td>3 + yellow, open next</td></tr>
       <tr><td>peak</td><td>5 + green, open next</td></tr>
@@ -76,23 +76,33 @@
   </details>
 
 <script>
-
 /* ===== command parser ===== */
 const SYNONYMS = {
-  next: ['next', 'necks', 'nex', 'next one', 'text'],
-  good: ['good', 'goods', 'good one'],
-  peak: ['peak', 'peek', 'peak one', 'excellent', 'excellence'],
-  undo: ['undo', 'undo that'],
-  back: ['back', 'go back', 'previous', 'last one'],
-  replay: ['replay', 'repeat', 'play again', 'restart'],
-  pause: ['pause'],
-  play: ['play', 'resume'],
-  down: ['descending', 'descend', 'go down'],
-  up: ['ascending', 'ascend', 'go up'],
-  top: ['top', 'go to top', 'go to the top', 'start from the top'],
-  bottom: ['bottom', 'go to bottom', 'go to the bottom', 'start from the bottom'],
-  na: ['na', 'n a', 'not applicable', 'n slash a']
+  next:      ['next', 'necks', 'nex', 'next one', 'text'],
+  good:      ['good', 'goods', 'good one'],
+  peak:      ['peak', 'peek', 'peak one', 'excellent', 'excellence'],
+  undo:      ['undo', 'undo that'],
+  back:      ['back', 'go back', 'previous', 'last one'],
+  replay:    ['replay', 'repeat', 'play again', 'restart'],
+  pause:     ['pause'],
+  play:      ['play', 'resume'],
+  down:      ['descending', 'descend', 'go down'],
+  up:        ['ascending', 'ascend', 'go up'],
+  top:       ['top', 'go to top', 'go to the top', 'start from the top'],
+  bottom:    ['bottom', 'go to bottom', 'go to the bottom', 'start from the bottom'],
+  na:        ['na', 'n a', 'not applicable', 'n slash a'],
 };
+// Extra words that only count when the sidebar says which tool it is (see applyApp).
+const APP_SYNONYMS = {
+  portfolio: {
+    next: ['not feeling it', 'not feeling this', 'not feeling'],
+    good: ['not bad', 'not too bad'],
+    skip: ['skip', 'skip it', 'skip this one', 'skip one'],
+    link: ['link', 'next link', 'other link', 'another link', 'second link', 'switch link'],
+    open: ['open', 'open it', 'reopen', 'open portfolio', 'open the portfolio', 'reload', 'refresh'],
+  },
+};
+let extraSynonyms = {};
 const NUM_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, for: 4, five: 5 };
 const NOTE_PREFIX = /^\s*(?:notes?|nodes?|add (?:a )?note)\b[\s,:.\-–]*/i;
 const CUSTOM_PREFIX = /^\s*(?:custom|costume|customer)\b[\s,:.\-–]*/i;
@@ -122,6 +132,9 @@ function parseCommand(raw) {
   for (const cmd in SYNONYMS) {
     if (SYNONYMS[cmd].includes(s)) return { cmd };
   }
+  for (const cmd in extraSynonyms) {
+    if (extraSynonyms[cmd].includes(s)) return { cmd };
+  }
   return null;
 }
 // "3.5", "three point five", "four and a half", "rate five", "5 out of 5" → { cmd: 'score', value }
@@ -129,13 +142,13 @@ function parseScore(raw) {
   let s = String(raw).toLowerCase().replace(/[^a-z0-9.,\s]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.,]$/, '');
   s = s.replace(/^(?:rate(?: it| them)?|rating|score|give (?:it|them)(?: a)?)\s+/, '').replace(/\s+out of (?:5|five)$/, '').trim();
   const W = '(\\d|zero|one|two|three|four|for|five)';
-  const val = (w) => /^\d$/.test(w) ? Number(w) : NUM_WORDS[w];
-  const ok = (n) => n >= 0 && n <= 5 ? { cmd: 'score', value: Math.round(n * 10) / 10 } : null;
+  const val = (w) => (/^\d$/.test(w) ? Number(w) : NUM_WORDS[w]);
+  const ok = (n) => (n >= 0 && n <= 5 ? { cmd: 'score', value: Math.round(n * 10) / 10 } : null);
   let m;
-  if (m = s.match(/^(\d)(?:[.,](\d))?$/)) return ok(Number(m[1]) + (m[2] ? Number(m[2]) / 10 : 0));
-  if (m = s.match(new RegExp('^' + W + ' point ' + W + '$'))) return ok(val(m[1]) + val(m[2]) / 10);
-  if (m = s.match(new RegExp('^' + W + ' and a half$'))) return ok(val(m[1]) + 0.5);
-  if (m = s.match(new RegExp('^' + W + '$'))) return ok(val(m[1]));
+  if ((m = s.match(/^(\d)(?:[.,](\d))?$/))) return ok(Number(m[1]) + (m[2] ? Number(m[2]) / 10 : 0));
+  if ((m = s.match(new RegExp('^' + W + ' point ' + W + '$')))) return ok(val(m[1]) + val(m[2]) / 10);
+  if ((m = s.match(new RegExp('^' + W + ' and a half$')))) return ok(val(m[1]) + 0.5);
+  if ((m = s.match(new RegExp('^' + W + '$')))) return ok(val(m[1]));
   return null;
 }
 /* ===== end parser ===== */
@@ -161,7 +174,7 @@ function hello() {
     setConn(false, 'Not connected. Open this window from the 🎤 button in the Sheets sidebar.');
     return;
   }
-  try {s.postMessage({ type: 'ar-hello' }, '*');} catch (e) {}
+  try { s.postMessage({ type: 'ar-hello' }, '*'); } catch (e) {}
   if (Date.now() - lastAck > 8000) setConn(false, 'Waiting for the sidebar… (is it still open?)');
 }
 
@@ -175,13 +188,34 @@ window.addEventListener('message', (e) => {
   const d = e.data || {};
   if (d.type === 'ar-ack') {
     lastAck = Date.now();
-    setConn(true, "Connected · " + (d.title || 'Sheets'));
+    setConn(true, `Connected · ${d.title || 'Sheets'}`);
+    applyApp(d);
   } else if (d.type === 'ar-status') {
     lastAck = Date.now();
     $('status').textContent = d.text;
     $('status').classList.toggle('err', !!d.isErr);
   }
 });
+
+// The sidebar can relabel this page (the portfolio reviewer does).
+let appliedApp = '';
+function applyApp(d) {
+  if (!d.app || d.app === appliedApp) return;
+  appliedApp = d.app;
+  extraSynonyms = APP_SYNONYMS[d.app] || {};
+  if (d.heading) { $('heading').textContent = d.heading; document.title = d.heading; }
+  if (d.tip) $('tip').textContent = d.tip;
+  if (d.hint && !/^✓/.test($('last').textContent)) $('last').textContent = d.hint;
+  if (Array.isArray(d.help)) {
+    const t = $('help');
+    t.innerHTML = '';
+    d.help.forEach((r) => {
+      const tr = t.insertRow();
+      tr.insertCell().textContent = String(r[0] || '');
+      tr.insertCell().textContent = String(r[1] || '');
+    });
+  }
+}
 
 function send(parsed, heard) {
   const s = sidebar();
@@ -190,7 +224,7 @@ function send(parsed, heard) {
     return;
   }
   s.postMessage({ type: 'ar-command', cmd: parsed.cmd, text: parsed.text || '', value: parsed.value, heard }, '*');
-  $('last').textContent = "✓ " + heard;
+  $('last').textContent = `✓ ${heard}`;
   if ($('beep').checked) beep();
 }
 
@@ -203,7 +237,7 @@ function handleUtterance(alternatives) {
   let heard = alts[0];
   for (const t of alts) {
     const p = parseCommand(t);
-    if (p) {parsed = p;heard = t;break;}
+    if (p) { parsed = p; heard = t; break; }
   }
 
   if (customMode) {
@@ -218,16 +252,16 @@ function handleUtterance(alternatives) {
   if (noteMode) {
     endNoteMode();
     if (parsed && parsed.cmd !== 'note-start') return send(parsed, heard);
-    return send({ cmd: 'note', text: alts[0] }, "notes " + alts[0]);
+    return send({ cmd: 'note', text: alts[0] }, `notes ${alts[0]}`);
   }
 
   if (!parsed) {
-    $('last').textContent = "Ignored: “" + alts[0] + "”";
+    $('last').textContent = `Ignored: “${alts[0]}”`;
     return;
   }
   if (parsed.cmd === 'note-start') return startNoteMode();
   if (parsed.cmd === 'custom-start') return startCustomMode();
-  if (parsed.cmd === 'custom-bad') {$('last').textContent = "Didn’t catch a number: “" + parsed.text + "”";return;}
+  if (parsed.cmd === 'custom-bad') { $('last').textContent = "Didn’t catch a number: “" + parsed.text + "”"; return; }
   send(parsed, heard);
 }
 
@@ -278,12 +312,12 @@ function browserProblem() {
 }
 
 const MIC_BLOCKED = 'The microphone is blocked. Click the icon at the left of the address bar → Microphone → Allow, then reload this window. ' +
-'Also check your computer allows it — Mac: System Settings → Privacy & Security → Microphone → turn on Chrome. ' +
-'Windows: Settings → Privacy → Microphone → allow desktop apps.';
+  'Also check your computer allows it — Mac: System Settings → Privacy & Security → Microphone → turn on Chrome. ' +
+  'Windows: Settings → Privacy → Microphone → allow desktop apps.';
 const MIC_PICK = 'Pick a different mic in the Microphone menu above (or in Chrome: Settings → Privacy and security → Site settings → Microphone).';
 
 function micErrorText(err) {
-  const name = err && err.name || '';
+  const name = (err && err.name) || '';
   if (name === 'NotAllowedError' || name === 'SecurityError') return MIC_BLOCKED;
   if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No microphone was found. Plug one in, or ' + MIC_PICK.charAt(0).toLowerCase() + MIC_PICK.slice(1);
   if (name === 'NotReadableError' || name === 'AbortError') return 'The microphone is busy or switched off. Close other apps using it (Zoom, Discord, Teams…), check it isn’t muted, and check your computer’s microphone privacy settings.';
@@ -293,18 +327,18 @@ function micErrorText(err) {
 function speechErrorText(code) {
   switch (code) {
     case 'not-allowed':
-    case 'service-not-allowed':return MIC_BLOCKED;
-    case 'audio-capture':return 'Chrome can’t get sound from the microphone. Check it’s plugged in and not muted. ' + MIC_PICK;
-    case 'network':return 'Chrome couldn’t reach Google’s voice service, which turns speech into text. Check the internet connection, turn off any VPN, and use desktop Chrome or Edge (Brave, Arc and Opera often block it).';
-    case 'language-not-supported':return 'This browser doesn’t support English voice recognition. Use desktop Chrome or Edge.';
-    default:return 'Voice recognition error: ' + code + '. Try reloading this window, or use desktop Chrome or Edge.';
+    case 'service-not-allowed': return MIC_BLOCKED;
+    case 'audio-capture': return 'Chrome can’t get sound from the microphone. Check it’s plugged in and not muted. ' + MIC_PICK;
+    case 'network': return 'Chrome couldn’t reach Google’s voice service, which turns speech into text. Check the internet connection, turn off any VPN, and use desktop Chrome or Edge (Brave, Arc and Opera often block it).';
+    case 'language-not-supported': return 'This browser doesn’t support English voice recognition. Use desktop Chrome or Edge.';
+    default: return 'Voice recognition error: ' + code + '. Try reloading this window, or use desktop Chrome or Edge.';
   }
 }
 
 /* ---------- choosing a mic ---------- */
 const MIC_KEY = 'arVoiceMic';
-function savedMic() {try {return localStorage.getItem(MIC_KEY) || '';} catch (e) {return '';}}
-function saveMic(id) {try {localStorage.setItem(MIC_KEY, id);} catch (e) {}}
+function savedMic() { try { return localStorage.getItem(MIC_KEY) || ''; } catch (e) { return ''; } }
+function saveMic(id) { try { localStorage.setItem(MIC_KEY, id); } catch (e) {} }
 
 // Chrome/Edge 135+ can run recognition on a chosen mic; older ones only use the default mic.
 function canUseChosenMic() {
@@ -322,9 +356,9 @@ async function refreshMics() {
   const want = sel.value || savedMic();
   sel.innerHTML = '';
   sel.appendChild(new Option('System default', ''));
-  mics.
-  filter((d) => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications').
-  forEach((d, i) => sel.appendChild(new Option(d.label || 'Microphone ' + (i + 1) + ' (names show after you allow the mic)', d.deviceId)));
+  mics
+    .filter((d) => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications')
+    .forEach((d, i) => sel.appendChild(new Option(d.label || 'Microphone ' + (i + 1) + ' (names show after you allow the mic)', d.deviceId)));
   sel.value = Array.from(sel.options).some((o) => o.value === want) ? want : '';
 }
 
@@ -355,9 +389,9 @@ async function startMeter() {
   }
   refreshMics(); // names become visible once the mic is allowed
   const track = meterStream.getAudioTracks()[0];
-  const label = track && track.label || 'default microphone';
+  const label = (track && track.label) || 'default microphone';
   $('micName').textContent = 'Mic: ' + label;
-  if (track) track.onended = () => {if (listening) showProblem('The microphone was disconnected. ' + MIC_PICK);};
+  if (track) track.onended = () => { if (listening) showProblem('The microphone was disconnected. ' + MIC_PICK); };
 
   meterCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (meterCtx.state === 'suspended') meterCtx.resume().catch(() => {});
@@ -369,7 +403,7 @@ async function startMeter() {
   meterTimer = setInterval(() => {
     analyser.getByteTimeDomainData(buf);
     let sum = 0;
-    for (let i = 0; i < buf.length; i++) {const v = (buf[i] - 128) / 128;sum += v * v;}
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
     const pct = Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 400));
     peakLevel = Math.max(peakLevel, pct);
     $('level').style.width = pct + '%';
@@ -420,8 +454,8 @@ async function startListening() {
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) handleUtterance(Array.from(r, (a) => a.transcript));else
-      interim += r[0].transcript;
+      if (r.isFinal) handleUtterance(Array.from(r, (a) => a.transcript));
+      else interim += r[0].transcript;
     }
     $('live').textContent = interim;
   };
@@ -441,8 +475,8 @@ async function startListening() {
   };
   // Chrome stops recognising after a while; restart automatically.
   rec.onend = () => {
-    if (listening) setTimeout(startRec, 250);else
-    updateMic();
+    if (listening) setTimeout(startRec, 250);
+    else updateMic();
   };
 
   listening = true;
@@ -456,10 +490,10 @@ function startRec() {
   const track = meterStream && meterStream.getAudioTracks()[0];
   const useTrack = !!($('micSelect').value && track && track.readyState === 'live' && canUseChosenMic());
   try {
-    if (useTrack) rec.start(track);else rec.start();
+    if (useTrack) rec.start(track); else rec.start();
   } catch (err) {
     if (useTrack && err && err.name !== 'InvalidStateError') {
-      try {rec.start();} catch (e) {}
+      try { rec.start(); } catch (e) {}
       showProblem('This browser can only listen through the default mic. Update Chrome or Edge, or make your mic the default in Chrome: Settings → Privacy and security → Site settings → Microphone.');
     }
   }
@@ -469,7 +503,7 @@ function stopListening(keepProblem) {
   listening = false;
   endNoteMode();
   endCustomMode();
-  if (rec) try {rec.stop();} catch (err) {}
+  if (rec) try { rec.stop(); } catch (err) {}
   stopMeter();
   $('live').textContent = '';
   if (!keepProblem) showProblem(browserProblem());
@@ -498,11 +532,11 @@ function beep() {
 }
 
 /* ---------- wiring ---------- */
-$('mic').onclick = () => listening ? stopListening() : startListening();
+$('mic').onclick = () => (listening ? stopListening() : startListening());
 showProblem(browserProblem());
 $('micSelect').onchange = () => {
   saveMic($('micSelect').value);
-  if (listening) {stopListening();startListening();}
+  if (listening) { stopListening(); startListening(); }
 };
 refreshMics();
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', refreshMics);
@@ -510,6 +544,11 @@ $('test').addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   handleUtterance([e.target.value]);
   e.target.value = '';
+});
+
+// If Chrome paused listening while this window was hidden, pick up again when it's back.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && listening && rec) startRec();
 });
 
 hello();
