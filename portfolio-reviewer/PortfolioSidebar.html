@@ -134,6 +134,18 @@
   </details>
 
 <script>
+/* Shows a script error in the sidebar instead of leaving it stuck on "Loading…". */
+(function () {
+  function show(msg) {
+    var s = document.getElementById('status');
+    var t = document.getElementById('title');
+    if (s) { s.textContent = 'Sidebar error: ' + msg + ' Close and reopen the sidebar; if it keeps happening, send this message to David.'; s.className = 'err'; }
+    if (t && /Loading/.test(t.textContent)) t.textContent = 'Couldn\u2019t start';
+  }
+  window.addEventListener('error', function (e) { show((e.message || 'error') + (e.lineno ? ' (line ' + e.lineno + ')' : '')); });
+})();
+</script>
+<script>
 const CFG = <?!= clientConfig ?>;
 const VIEW_NAME = 'prPortfolioViewer';
 
@@ -565,8 +577,60 @@ function currentUrl() {
   const c = state.current;
   if (!c) return noteUrl({ done: true });
   const l = c.links[state.linkIndex];
-  if (l) return l.url;
+  if (l) return viewerUrlFor(l, c);
   return noteUrl({ name: c.name, text: c.portfolio });
+}
+
+/* ===== viewer links ===== */
+// Some sites cut the portfolio tab's link back to the sidebar when they're opened in it directly
+// (Google Drive / Docs, Instagram… send a "Cross-Origin-Opener-Policy" header). After that the
+// sidebar can't change that tab any more. So those sites are shown inside our own page
+// (portfolio-note.html) instead, using their embeddable address where there is one. Sites not on
+// the list are learned the first time they do it (remembered in this browser).
+const CUT_HOSTS = ['docs.google.com', 'drive.google.com', 'instagram.com', 'facebook.com', 'youtube.com', 'youtu.be', 'vimeo.com'];
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch (e) { return ''; }
+}
+
+// The address a site lets other pages show it at, or '' if we don't know one.
+// (Plain quotes: HtmlService cuts "//" inside backticks.)
+function embedFor(url) {
+  let m;
+  if ((m = url.match(/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/([\w-]{10,})/i))) return 'https://drive.google.com/embeddedfolderview?id=' + m[1] + '#grid';
+  if ((m = url.match(/drive\.google\.com\/(?:u\/\d+\/)?(?:file\/d\/|open\?id=|uc\?(?:[^#]*&)?id=)([\w-]{10,})/i))) return 'https://drive.google.com/file/d/' + m[1] + '/preview';
+  if ((m = url.match(/docs\.google\.com\/(document|presentation|spreadsheets|drawings)\/(?:u\/\d+\/)?d\/([\w-]{10,})/i))) return 'https://docs.google.com/' + m[1].toLowerCase() + '/d/' + m[2] + '/preview';
+  if ((m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/))([\w-]{11})/i))) return 'https://www.youtube.com/embed/' + m[1];
+  if ((m = url.match(/vimeo\.com\/(?:video\/)?(\d{5,})/i))) return 'https://player.vimeo.com/video/' + m[1];
+  if ((m = url.match(/instagram\.com\/(p|reel)\/([\w-]+)/i))) return 'https://www.instagram.com/' + m[1].toLowerCase() + '/' + m[2] + '/embed/';
+  if ((m = url.match(/instagram\.com\/([\w.]+)\/?(?:[?#]|$)/i)) && !/^(p|reel|reels|s|stories|explore|accounts)$/i.test(m[1])) return 'https://www.instagram.com/' + m[1] + '/embed/';
+  if ((m = url.match(/behance\.net\/gallery\/(\d+)/i))) return 'https://www.behance.net/embed/project/' + m[1] + '?ilo0=1';
+  return '';
+}
+
+function cutsLink(host, learned) {
+  return !!host && CUT_HOSTS.concat(learned || []).some((h) => host === h || host.endsWith('.' + h));
+}
+/* ===== end viewer links ===== */
+
+function learnedCuts() {
+  try { return JSON.parse(localStorage.getItem('prCutHosts') || '[]') || []; } catch (e) { return []; }
+}
+function learnCut(host) {
+  if (!host) return;
+  const list = learnedCuts();
+  if (list.indexOf(host) !== -1) return;
+  list.push(host);
+  try { localStorage.setItem('prCutHosts', JSON.stringify(list.slice(-50))); } catch (e) {}
+  state.cutHosts = list;
+}
+
+// Where the portfolio tab goes for this link: the site itself, or our page showing it.
+function viewerUrlFor(link, c) {
+  const embed = embedFor(link.url);
+  const host = hostOf(link.url);
+  if (!embed && !cutsLink(host, state.cutHosts || learnedCuts())) return link.url;
+  return noteUrl({ name: c.name, number: c.number, label: link.label, show: link.url, embed: embed || link.url });
 }
 
 // The note page gets its text after "#", so nothing about the applicant is sent to a server.
@@ -587,22 +651,27 @@ function features() {
   return `popup,left=${L},top=${T},width=${Math.max(640, W - 420)},height=${H}`;
 }
 
-// Points the portfolio tab at url. Returns false if the browser needs a click first.
-function showInViewer(url) {
+// Points the portfolio tab at url. Only opens a new tab when you asked for it (explicit: the
+// Open portfolio button, O, or "open"), never by itself. Returns false if nothing is showing it.
+function showInViewer(url, explicit) {
   if (!url) return false;
   if (viewerOpen()) {
     try {
       viewer.location.replace(url);
-      watchViewer();
+      watchViewer(url);
       setViewerState(true);
       return true;
-    } catch (e) { /* fall through and reopen */ }
+    } catch (e) { /* fall through */ }
+  }
+  if (!explicit) {
+    setViewerState(false, 'closed');
+    return false;
   }
   let w = null;
   try { w = window.open(url, VIEW_NAME, features()); } catch (e) { w = null; }
   if (w) {
     viewer = w;
-    watchViewer();
+    watchViewer(url);
     setViewerState(true);
     return true;
   }
@@ -610,17 +679,25 @@ function showInViewer(url) {
   return false;
 }
 
-// Some sites cut the link back to this sidebar. Notice that, so the next one can reopen.
+// Some sites cut the link back to this sidebar right after they load. Notice that, remember the
+// site so it's shown inside our page next time, and tell the person (no new tab by itself).
 let watchTimer = null;
-function watchViewer() {
+function watchViewer(url) {
   clearTimeout(watchTimer);
-  watchTimer = setTimeout(() => { if (!viewerOpen() && state.viewerWanted) setViewerState(false, 'lost'); }, 2500);
+  const ours = !url || url.indexOf(CFG.noteUrl) === 0;
+  const host = ours ? '' : hostOf(url);
+  watchTimer = setTimeout(() => {
+    if (viewerOpen() || !state.viewerWanted) return;
+    if (host) { learnCut(host); setViewerState(false, 'cut', host); }
+    else setViewerState(false, 'closed');
+  }, 2500);
 }
 
-function setViewerState(open, why) {
+function setViewerState(open, why, host) {
   $('viewerDot').classList.toggle('on', open);
   const el = $('viewerState');
   $('bOpen').classList.toggle('attn', !open && state.viewerWanted);
+  if (open) state.viewerNoticed = false;
   if (open) {
     el.classList.remove('err');
     el.textContent = state.view === 'popup'
@@ -630,9 +707,18 @@ function setViewerState(open, why) {
     el.classList.add('err');
     el.textContent = 'The browser wants a click: press “Open portfolio” (or O). To skip this step, allow pop-ups for docs.google.com (icon at the right of the address bar → Always allow).';
     tellVoice('Click “Open portfolio” in the sidebar to show this one.', true, { say: 'Click open portfolio in the sidebar to show this one.' });
-  } else if (why === 'lost') {
-    el.classList.remove('err');
-    el.textContent = 'Lost track of the portfolio tab (it was closed, or that site cut the link). The next one opens in a new tab.';
+  } else if (why === 'cut') {
+    el.classList.add('err');
+    el.textContent = `${host} cut the portfolio tab’s link to the sidebar, so the sidebar can’t change that tab any more. Close it and press “Open portfolio” (O). From now on ${host} opens inside the portfolio page, so this won’t happen again.`;
+    tellVoice(el.textContent, true, { say: 'That site disconnected the portfolio tab. Close it, then press open portfolio.' });
+    state.viewerNoticed = true;
+  } else if (why === 'closed') {
+    el.classList.add('err');
+    el.textContent = 'The portfolio tab is closed. Press “Open portfolio” (O) to open it again; the sidebar won’t open new tabs by itself.';
+    if (!state.viewerNoticed && state.viewerWanted) {
+      state.viewerNoticed = true;
+      tellVoice(el.textContent, true, { say: 'The portfolio tab is closed. Press open portfolio to open it again.' });
+    }
   } else {
     el.classList.remove('err');
     el.textContent = 'Click “Open portfolio” once. After that, every rating opens the next portfolio in the same tab.';
@@ -642,7 +728,7 @@ function setViewerState(open, why) {
 function openCurrent() {
   state.viewerWanted = true;
   const url = currentUrl();
-  const ok = showInViewer(url);
+  const ok = showInViewer(url, true);
   if (ok) { try { viewer.focus(); } catch (e) {} }
   return ok;
 }
@@ -738,7 +824,7 @@ function renderLinks() {
       state.linkIndex = i;
       renderLinks();
       state.viewerWanted = true;
-      showInViewer(l.url);
+      showInViewer(currentUrl(), true);
     };
     box.appendChild(a);
   });
