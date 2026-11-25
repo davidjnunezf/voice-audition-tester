@@ -13,6 +13,9 @@
  *   skip                    → next portfolio, nothing written
  *   link                    → their next link, when they gave more than one
  *   open                    → reopen this portfolio
+ *   add to layout           → also copy them into the Layout tab (any category tab) when rated
+ *   remove from layout      → take that back before rating
+ * A rating is also written into every other tab the applicant is already in (Notes there are left alone).
  *   notes …                 → appends "- …" to Notes
  *   back / undo / top / bottom / descending / ascending
  *
@@ -122,6 +125,7 @@ function pr_init() {
   return {
     sheetName: sheet.getName(),
     title: ss.getName(),
+    tabs: pr_tabs_(ss, sheet),
     dir: dir,
     view: pr_getPref_('view') === 'popup' ? 'popup' : 'tab',
     remaining: scan.remaining,
@@ -130,8 +134,11 @@ function pr_init() {
   };
 }
 
-/** Rates the row, then returns the next open applicant in the current direction. */
-function pr_rate(sheetName, row, cmd, dir, value) {
+/**
+ * Rates the row, copies it into any tabs in addTo (e.g. ['Layout']),
+ * then returns the next open applicant in the current direction.
+ */
+function pr_rate(sheetName, row, cmd, dir, value, addTo) {
   const sheet = pr_sheet_(sheetName);
   const cols = pr_columns_(sheet);
   pr_checkRow_(sheet, row);
@@ -139,10 +146,13 @@ function pr_rate(sheetName, row, cmd, dir, value) {
 
   const reviewedCell = sheet.getRange(row, cols.reviewed);
   const ratingCell = sheet.getRange(row, cols.rating);
-  const undo = { row: row, reviewed: reviewedCell.getValue(), rating: ratingCell.getValue() };
+  const undo = { kind: 'rate', row: row, reviewed: reviewedCell.getValue(), rating: ratingCell.getValue(), copies: [] };
 
   reviewedCell.setValue(spec.reviewed);
   ratingCell.setValue(spec.rating);
+  const added = pr_copyAll_(sheet, cols, row, addTo);
+  const synced = pr_syncTabs_(sheet, cols, row, added.map(function (a) { return a.tab; }));
+  undo.copies = added.concat(synced);
 
   const scan = pr_scan_(sheet, cols);
   const nextRow = pr_nextFrom_(scan, row, dir);
@@ -150,9 +160,23 @@ function pr_rate(sheetName, row, cmd, dir, value) {
 
   return {
     rated: { row: row, name: pr_nameAt_(sheet, cols, row), rating: String(spec.rating).trim(), reviewed: spec.reviewed, cmd: cmd },
+    added: added.map(function (a) { return { tab: a.tab, updated: !!a.prev }; }),
+    synced: synced.map(function (a) { return a.tab; }),
     undo: undo,
     remaining: scan.remaining,
     next: nextRow ? pr_rowInfo_(sheet, cols, nextRow) : null,
+  };
+}
+
+/** Copies the row into the given tabs right away (used when the applicant is already rated, or on skip). */
+function pr_addTo(sheetName, row, tabs) {
+  const sheet = pr_sheet_(sheetName);
+  const cols = pr_columns_(sheet);
+  pr_checkRow_(sheet, row);
+  const added = pr_copyAll_(sheet, cols, row, tabs);
+  return {
+    added: added.map(function (a) { return { tab: a.tab, updated: !!a.prev }; }),
+    undo: { kind: 'add', row: row, copies: added },
   };
 }
 
@@ -166,16 +190,23 @@ function pr_skip(sheetName, row, dir) {
   return { remaining: scan.remaining, next: nextRow ? pr_rowInfo_(sheet, cols, nextRow) : null };
 }
 
-/** Reverts a rating (using the undo object pr_rate returned) and goes back to that row. */
+/**
+ * Reverts a rating or an "add to" (using the undo object pr_rate / pr_addTo returned):
+ * copies it made are removed (or put back as they were), and a rating goes back to that row.
+ */
 function pr_undo(sheetName, undo) {
   const sheet = pr_sheet_(sheetName);
   const cols = pr_columns_(sheet);
   pr_checkRow_(sheet, undo.row);
+  const removed = pr_removeCopies_(undo.copies || []);
+  if (undo.kind === 'add') {
+    return { removed: removed, remaining: pr_scan_(sheet, cols).remaining, current: pr_rowInfo_(sheet, cols, undo.row) };
+  }
   sheet.getRange(undo.row, cols.reviewed).setValue(undo.reviewed === null ? '' : undo.reviewed);
   sheet.getRange(undo.row, cols.rating).setValue(undo.rating === null ? '' : undo.rating);
   const scan = pr_scan_(sheet, cols);
   pr_select_(sheet, cols, undo.row);
-  return { remaining: scan.remaining, current: pr_rowInfo_(sheet, cols, undo.row) };
+  return { removed: removed, remaining: scan.remaining, current: pr_rowInfo_(sheet, cols, undo.row) };
 }
 
 /** Appends "- text" to the Notes cell. */
@@ -230,6 +261,172 @@ function pr_setPref(key, value) {
   if (['dir', 'view'].indexOf(key) === -1) throw new Error('Unknown setting ' + key);
   PropertiesService.getUserProperties().setProperty(pr_prefKey_(key), String(value));
   return value;
+}
+
+/* ---------------- Category tabs ("add to …") ---------------- */
+
+/** Other tabs with the same applicant columns (Layout, Character Design, Story…), in sheet order. */
+function pr_tabs_(ss, source) {
+  const out = [];
+  ss.getSheets().forEach(function (sh) {
+    if (sh.getSheetId() === source.getSheetId() || sh.getName() === PR_CONFIG.mainSheet) return;
+    if (sh.isSheetHidden && sh.isSheetHidden()) return;
+    try {
+      const c = pr_columns_(sh);
+      if (c.name) out.push(sh.getName());
+    } catch (e) {
+      // Not an applicant tab.
+    }
+  });
+  return out;
+}
+
+/**
+ * Copies the row into each tab. Returns [{ tab, row, number, name, prev }].
+ * If they're already in a tab, only Reviewed? and Rating are refreshed there, and prev holds the old ones.
+ */
+function pr_copyAll_(sheet, cols, row, tabs) {
+  const list = (tabs || []).filter(function (t, i, a) { return t && a.indexOf(t) === i; });
+  if (!list.length) return [];
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(20000);
+  try {
+    return list.map(function (t) { return pr_copyTo_(sheet, cols, row, t); });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function pr_copyTo_(sheet, cols, row, tabName) {
+  const ss = sheet.getParent();
+  const target = ss.getSheetByName(tabName);
+  if (!target) throw new Error('There is no "' + tabName + '" tab.');
+  if (target.getSheetId() === sheet.getSheetId()) throw new Error('They are already on "' + tabName + '".');
+  const tcols = pr_columns_(target);
+  const number = cols.number ? String(sheet.getRange(row, cols.number).getDisplayValue()).trim() : '';
+  const name = pr_nameAt_(sheet, cols, row);
+
+  // Already in that tab? Then just refresh their rating there instead of adding a second row.
+  const existing = pr_findApplicant_(target, tcols, number, name);
+  if (existing) {
+    const prev = {};
+    ['reviewed', 'rating'].forEach(function (k) {
+      const cell = target.getRange(existing, tcols[k]);
+      prev[k] = String(cell.getDisplayValue());
+      cell.setValue(sheet.getRange(row, cols[k]).getValue());
+    });
+    return { tab: tabName, row: existing, number: number, name: name, prev: prev };
+  }
+
+  const at = Math.max(1, pr_lastDataRow_(target, tcols)) + 1;
+  if (at > target.getMaxRows()) target.insertRowsAfter(target.getMaxRows(), at - target.getMaxRows());
+  if (pr_sameHeaders_(sheet, target, cols.lastCol)) {
+    // Same columns: copy the whole row, dropdowns and formatting included.
+    sheet.getRange(row, 1, 1, cols.lastCol).copyTo(target.getRange(at, 1, 1, cols.lastCol));
+  } else {
+    // Different layout: match columns by header.
+    const head = sheet.getRange(1, 1, 1, cols.lastCol).getValues()[0].map(function (h) { return String(h).replace(/\s+/g, ' ').trim().toLowerCase(); });
+    const vals = sheet.getRange(row, 1, 1, cols.lastCol).getValues()[0];
+    const theads = target.getRange(1, 1, 1, tcols.lastCol).getValues()[0];
+    const outRow = theads.map(function (h, i) {
+      const k = head.indexOf(String(h).replace(/\s+/g, ' ').trim().toLowerCase());
+      return k === -1 ? '' : vals[k];
+    });
+    target.getRange(at, 1, 1, outRow.length).setValues([outRow]);
+  }
+  return { tab: tabName, row: at, number: number, name: name, prev: null };
+}
+
+/**
+ * Writes the row's Reviewed? and Rating into every other tab where this applicant already is
+ * (skipping tabs in skip). Returns [{ tab, row, number, name, prev }] for undo.
+ */
+function pr_syncTabs_(sheet, cols, row, skip) {
+  const number = cols.number ? String(sheet.getRange(row, cols.number).getDisplayValue()).trim() : '';
+  const name = pr_nameAt_(sheet, cols, row);
+  const want = pr_norm_(name);
+  const reviewed = sheet.getRange(row, cols.reviewed).getValue();
+  const rating = sheet.getRange(row, cols.rating).getValue();
+  const out = [];
+  if (!want) return out;
+  sheet.getParent().getSheets().forEach(function (sh) {
+    const tab = sh.getName();
+    if (sh.getSheetId() === sheet.getSheetId() || (skip || []).indexOf(tab) !== -1) return;
+    const data = sh.getDataRange().getDisplayValues();
+    if (data.length < 2) return;
+    const t = pr_findCols_(data[0]);
+    if (!t.name || !t.reviewed || !t.rating) return;
+    for (let i = 1; i < data.length; i++) {
+      if (pr_norm_(data[i][t.name - 1]) !== want) continue;
+      if (number && t.number && String(data[i][t.number - 1]).trim() !== number) continue;
+      const prev = { reviewed: data[i][t.reviewed - 1], rating: data[i][t.rating - 1] };
+      if (prev.reviewed === String(reviewed) && prev.rating === String(rating)) continue;
+      sh.getRange(i + 1, t.reviewed).setValue(reviewed);
+      sh.getRange(i + 1, t.rating).setValue(rating);
+      out.push({ tab: tab, row: i + 1, number: number, name: name, prev: prev });
+    }
+  });
+  return out;
+}
+
+/** Last row with an applicant name (the sheet may have empty formatted rows below). */
+function pr_lastDataRow_(sheet, cols) {
+  const last = sheet.getLastRow();
+  if (last < 2 || !cols.name) return last;
+  const names = sheet.getRange(2, cols.name, last - 1, 1).getDisplayValues();
+  for (let i = names.length - 1; i >= 0; i--) if (String(names[i][0]).trim()) return i + 2;
+  return 1;
+}
+
+function pr_findApplicant_(sheet, cols, number, name) {
+  const last = sheet.getLastRow();
+  if (last < 2 || !cols.name) return 0;
+  const names = sheet.getRange(2, cols.name, last - 1, 1).getDisplayValues();
+  const nums = cols.number ? sheet.getRange(2, cols.number, last - 1, 1).getDisplayValues() : null;
+  const want = pr_norm_(name);
+  for (let i = 0; i < names.length; i++) {
+    if (pr_norm_(names[i][0]) !== want) continue;
+    if (nums && number && String(nums[i][0]).trim() !== number) continue;
+    return i + 2;
+  }
+  return 0;
+}
+
+function pr_sameHeaders_(a, b, n) {
+  if (b.getLastColumn() < n) return false;
+  const ha = a.getRange(1, 1, 1, n).getDisplayValues()[0];
+  const hb = b.getRange(1, 1, 1, n).getDisplayValues()[0];
+  for (let i = 0; i < n; i++) if (pr_norm_(ha[i]) !== pr_norm_(hb[i])) return false;
+  return true;
+}
+
+/** Undoes copies: rows we added are deleted, rows we refreshed get their old values back. */
+function pr_removeCopies_(copies) {
+  if (!copies.length) return [];
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const lock = LockService.getDocumentLock();
+  lock.waitLock(20000);
+  const done = [];
+  try {
+    copies.slice().reverse().forEach(function (c) {
+      const target = ss.getSheetByName(c.tab);
+      if (!target || c.row > target.getLastRow()) return;
+      const tcols = pr_columns_(target);
+      // Only touch the row if it's still that applicant (someone may have edited the tab since).
+      const vals = target.getRange(c.row, 1, 1, tcols.lastCol).getDisplayValues()[0];
+      if (pr_norm_(vals[tcols.name - 1]) !== pr_norm_(c.name)) return;
+      if (c.number && tcols.number && String(vals[tcols.number - 1]).trim() !== c.number) return;
+      if (c.prev) {
+        Object.keys(c.prev).forEach(function (k) { if (tcols[k]) target.getRange(c.row, tcols[k]).setValue(c.prev[k]); });
+      } else {
+        target.deleteRow(c.row);
+      }
+      done.push(c.tab);
+    });
+  } finally {
+    lock.releaseLock();
+  }
+  return done;
 }
 
 /* ---------------- Helpers ---------------- */
@@ -339,7 +536,18 @@ function pr_checkRow_(sheet, row) {
 
 function pr_columns_(sheet) {
   const lastCol = Math.max(1, sheet.getLastColumn());
-  const headers = sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0].map(function (h) {
+  const cols = pr_findCols_(sheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0]);
+  const missing = ['reviewed', 'rating', 'notes', 'portfolio'].filter(function (k) { return !cols[k]; });
+  if (missing.length) {
+    throw new Error('Couldn\'t find the ' + missing.join(', ') + ' column(s) on "' + sheet.getName() +
+      '". Check the header names in PR_CONFIG.headers.');
+  }
+  return cols;
+}
+
+/** Column numbers (1-based, 0 = missing) for each PR_CONFIG.headers key, from a header row. */
+function pr_findCols_(headerRow) {
+  const headers = headerRow.map(function (h) {
     return String(h).replace(/\s+/g, ' ').trim().toLowerCase();
   });
   const find = function (candidates) {
@@ -354,13 +562,8 @@ function pr_columns_(sheet) {
     }
     return 0;
   };
-  const cols = { lastCol: lastCol };
+  const cols = { lastCol: headerRow.length };
   Object.keys(PR_CONFIG.headers).forEach(function (key) { cols[key] = find(PR_CONFIG.headers[key]); });
-  const missing = ['reviewed', 'rating', 'notes', 'portfolio'].filter(function (k) { return !cols[k]; });
-  if (missing.length) {
-    throw new Error('Couldn\'t find the ' + missing.join(', ') + ' column(s) on "' + sheet.getName() +
-      '". Check the header names in PR_CONFIG.headers.');
-  }
   return cols;
 }
 
