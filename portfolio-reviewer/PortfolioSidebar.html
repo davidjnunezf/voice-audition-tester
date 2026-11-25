@@ -45,6 +45,9 @@
     .c-good { background: var(--yellow); border-color: #f1c232; }
     .c-peak { background: var(--green); border-color: #6aa84f; }
     .c-na { background: #ea9999; border-color: #cc4125; }
+    .progress { margin-top: 8px; padding: 6px 8px; border-radius: 8px; background: var(--bg); font-size: 11px; color: #374151; }
+    .progress div + div { margin-top: 2px; }
+    #others { background: #fef7e0; color: #8a5a00; }
     .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; align-items: center; }
     .tabs .lbl { font-size: 11px; color: var(--muted); margin-right: 2px; }
     .tabs button { font-size: 11px; padding: 3px 8px; border-radius: 999px; }
@@ -69,6 +72,11 @@
   <div class="row between">
     <h1 id="title">Loading…</h1>
     <span class="pill" id="remaining">–</span>
+  </div>
+  <div class="row" style="margin-top:4px"><span class="pill" id="others" hidden></span></div>
+  <div class="progress" id="progress">
+    <div id="progToday">Today: –</div>
+    <div id="progMe"></div>
   </div>
 
   <div style="margin-top:10px">
@@ -105,6 +113,7 @@
     <button id="bBack" class="small" title="Previous applicant (rating unchanged)">← Back <kbd>B</kbd></button>
     <button id="bUndo" class="small">↶ Undo <kbd>U</kbd></button>
     <button id="bHere" class="small" title="Review whichever row is selected in the sheet">Use selected row</button>
+    <button id="bShort" class="small" title="Make a Shortlist tab: PEAK and Not bad applicants per category tab, with links">📋 Build shortlist</button>
   </div>
 
   <div style="margin-top:10px">
@@ -143,6 +152,13 @@ const state = {
   tabs: [],              // category tabs: Layout, Character Design, Story…
   pending: [],           // tabs to copy the current applicant into when they're rated
   done: [],              // tabs the current applicant was copied into
+  peek: null,            // the applicant after this one, ready to show the moment you rate
+  navBusy: 0,            // a Back / go to / undo is on its way: ratings wait for it
+  others: 0,             // other people reviewing this tab right now
+  stats: null,           // today's numbers for this tab (everyone)
+  times: [],             // when you rated, this session (for your pace)
+  // Identifies this sidebar so a second reviewer skips what we're holding.
+  sid: Math.random().toString(36).slice(2) + Date.now().toString(36),
 };
 let viewer = null;       // the portfolio tab / window
 let queue = Promise.resolve();
@@ -165,39 +181,126 @@ function enqueue(task) {
 }
 
 /* ---------- commands (buttons, keys and voice all land here) ---------- */
+const RATE_CMDS = { next: 1, good: 1, peak: 1, excellent: 1, na: 1, score: 1, option: 1 };
+const NAV_CMDS = { undo: 1, back: 1, top: 1, bottom: 1, goto: 1, down: 1, up: 1 };
+const opts = (extra) => Object.assign({ sid: state.sid }, extra || {});
+
 // tab: a tab name from the Add to buttons. answer: the voice remote sent this as the answer to a question.
 function command(cmd, arg, tab, answer) {
-  // Window controls run straight away; everything that touches the sheet runs in order.
+  // Window controls run straight away; ratings move on straight away and save in the background;
+  // everything else that touches the sheet runs in order.
   if (cmd === 'open' || cmd === 'replay' || cmd === 'play') return openCurrent();
   if (cmd === 'link') return nextLink();
   if (cmd === 'pause') return;
+  if (cmd === 'progress') return sayProgress();
+  if (RATE_CMDS[cmd]) return rateNow(cmd, cmd === 'score' || cmd === 'option' ? arg : undefined);
+  if (cmd === 'skip') return skipNow();
+  if (NAV_CMDS[cmd]) state.navBusy++;
   return enqueue(async () => {
-    switch (cmd) {
-      case 'next': case 'good': case 'peak': case 'excellent': case 'na': return rate(cmd);
-      case 'score': case 'option': return rate(cmd, arg);
-      case 'skip': return skip();
-      case 'addto': return addTo(arg, tab, answer);
-      case 'removefrom': return removeFrom(arg, tab, answer);
-      case 'note': return addNote(arg);
-      case 'undo': return undo();
-      case 'back': return back();
-      case 'down': case 'up': return setDir(cmd);
-      case 'top': case 'bottom': return jump(cmd);
-      default: throw new Error('Unknown command: ' + cmd);
+    try {
+      switch (cmd) {
+        case 'addto': return await addTo(arg, tab, answer);
+        case 'removefrom': return removeFrom(arg, tab, answer);
+        case 'note': return await addNote(arg);
+        case 'undo': return await undo();
+        case 'back': return await back();
+        case 'goto': return await goTo(arg);
+        case 'down': case 'up': return await setDir(cmd);
+        case 'top': case 'bottom': return await jump(cmd);
+        default: throw new Error('Unknown command: ' + cmd);
+      }
+    } finally {
+      if (NAV_CMDS[cmd]) state.navBusy--;
     }
   });
 }
 
-async function rate(cmd, value) {
+// Everything a call sends back: counts, who else is reviewing, today's numbers, and what's next.
+function absorb(res) {
+  if (!res) return;
+  if (typeof res.remaining === 'number') state.remaining = res.remaining;
+  if (typeof res.others === 'number') state.others = res.others;
+  if (res.stats) state.stats = res.stats;
+  if (res.current && state.current && res.current.row === state.current.row) state.peek = res.peek || null;
+  renderCard();
+  renderProgress();
+}
+
+// Show what the server picked (and remember the one after it).
+function land(res, msg) {
+  absorb(res);
+  show(res.current, msg);
+  state.peek = res.peek || null;
+}
+
+function guessLabel(cmd, value) {
+  if (cmd === 'na') return 'N/A';
+  const byCmd = { next: 'next', good: 'good', peak: 'peak', excellent: 'peak' };
+  let c = null;
+  if (byCmd[cmd]) c = state.choices.find((x) => x.cmd === byCmd[cmd]);
+  else if (cmd === 'score') c = state.choices[Number(value) - 1];
+  else if (cmd === 'option') c = state.choices.find((x) => x.option === value);
+  return c ? c.label : cmd;
+}
+
+// Instant next: show the next applicant now and save the rating in the background.
+function rateNow(cmd, value) {
+  // A Back / go to / undo is still on its way: wait for it so the rating lands on the right person.
+  if (state.navBusy) return enqueue(async () => rateNow(cmd, value));
   const cur = state.current;
-  if (!cur) throw new Error('Nothing open to rate. Try “top” or “bottom”.');
-  const res = await run('pr_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value, state.pending.slice());
-  pushUndo(res.undo);
+  if (!cur) { status('Nothing open to rate. Try “top” or “bottom”.', true, { say: 'Nothing open to rate.' }); return; }
+  const showing = state.peek && state.peek.row !== cur.row ? state.peek : null;
+  const pending = state.pending.slice();
+  const label = guessLabel(cmd, value);
   pushHistory(cur.row);
-  state.remaining = res.remaining;
-  const what = res.rated.reviewed === 'No' ? 'N/A' : res.rated.rating;
-  const synced = res.synced && res.synced.length ? ` · rating updated in ${res.synced.join(', ')}` : '';
-  show(res.next, `${what} → ${res.rated.name}${addedText(res.added)}${synced}`);
+  if (showing) show(showing, `${label} → ${cur.name} (saving…)`);
+  else status(`Saving ${label} → ${cur.name}…`);
+  enqueue(async () => {
+    let res;
+    try {
+      res = await run('pr_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value, pending, opts({ showing: showing ? showing.row : 0 }));
+    } catch (err) {
+      const m = (err && err.message) || String(err);
+      status(`Couldn’t save ${label} for ${cur.name}: ${m} Say “back” to try again.`, true,
+        { say: m.length <= 90 ? 'Couldn’t save that rating. ' + m : 'Couldn’t save that rating. Say back to try again.' });
+      return;
+    }
+    pushUndo(res.undo);
+    state.times.push(Date.now());
+    const what = res.rated.reviewed === 'No' ? 'N/A' : res.rated.rating;
+    const synced = res.synced && res.synced.length ? ` · rating updated in ${res.synced.join(', ')}` : '';
+    const msg = `${what} → ${res.rated.name}${addedText(res.added)}${synced}`;
+    if (!showing) return land(res, msg);
+    if (state.current && state.current.row === showing.row) {
+      if (res.changed) land(res, `${msg} · someone else has that one, moved on`);
+      else { absorb(res); status(`${msg} · Now: ${state.current.name} (#${state.current.number || '?'}, row ${state.current.row})`); }
+    } else {
+      absorb(res);
+    }
+  });
+}
+
+function skipNow() {
+  if (state.navBusy) return enqueue(async () => skipNow());
+  const cur = state.current;
+  if (!cur) { status('Nothing open to skip.', true, { say: 'Nothing open to skip.' }); return; }
+  const showing = state.peek && state.peek.row !== cur.row ? state.peek : null;
+  const pending = state.pending.slice();
+  pushHistory(cur.row);
+  if (showing) show(showing, `Skipped ${cur.name}`);
+  enqueue(async () => {
+    let note = '';
+    if (pending.length) {
+      // They asked for these tabs, so copy them even though they're skipping the rating.
+      const add = await run('pr_addTo', state.sheet, cur.row, pending);
+      pushUndo(add.undo);
+      note = addedText(add.added);
+    }
+    const res = await run('pr_skip', state.sheet, cur.row, state.dir, opts({ showing: showing ? showing.row : 0 }));
+    if (!showing) return land(res, `Skipped ${cur.name}${note}`);
+    if (state.current && state.current.row === showing.row && res.changed) land(res, `Skipped ${cur.name}${note} · someone else has that one, moved on`);
+    else { absorb(res); if (note) status(`Skipped ${cur.name}${note}`); }
+  });
 }
 
 function pushUndo(u) {
@@ -325,22 +428,6 @@ function renderTabs() {
   });
 }
 
-async function skip() {
-  const cur = state.current;
-  if (!cur) throw new Error('Nothing open to skip.');
-  let note = '';
-  if (state.pending.length) {
-    // They asked for these tabs, so copy them even though they're skipping the rating.
-    const add = await run('pr_addTo', state.sheet, cur.row, state.pending.slice());
-    pushUndo(add.undo);
-    note = addedText(add.added);
-  }
-  const res = await run('pr_skip', state.sheet, cur.row, state.dir);
-  pushHistory(cur.row);
-  state.remaining = res.remaining;
-  show(res.next, `Skipped ${cur.name}${note}`);
-}
-
 function pushHistory(row) {
   state.history.push(row);
   if (state.history.length > 100) state.history.shift();
@@ -362,22 +449,22 @@ async function addNote(text) {
 async function undo() {
   const u = state.undoStack.pop();
   if (!u) throw new Error('Nothing to undo.');
-  const res = await run('pr_undo', state.sheet, u);
+  const res = await run('pr_undo', state.sheet, u, state.dir, opts());
   const took = res.removed && res.removed.length ? ` · also undone in ${res.removed.join(', ')}` : '';
   if (u.kind === 'add') {
-    state.remaining = res.remaining;
+    absorb(res);
     if (state.current && state.current.row === u.row) {
       state.done = state.done.filter((t) => res.removed.indexOf(t) === -1);
       renderTabs();
       status(`Undid “add to”${took.replace('also undone in', 'took them out of')}`);
     } else {
-      show(res.current, `Undid “add to”${took.replace('also undone in', 'took them out of')}`);
+      land(res, `Undid “add to”${took.replace('also undone in', 'took them out of')}`);
     }
     return;
   }
   if (state.history[state.history.length - 1] === u.row) state.history.pop();
-  state.remaining = res.remaining;
-  show(res.current, `Undid rating → ${res.current.name}${took}`);
+  state.times.pop();
+  land(res, `Undid rating → ${res.current.name}${took}`);
 }
 
 async function back() {
@@ -388,9 +475,8 @@ async function back() {
     row = state.dir === 'up' ? cur.row + 1 : cur.row - 1;
   }
   if (row < 2) throw new Error('Already at the first applicant.');
-  const res = await run('pr_rowAt', state.sheet, row);
-  state.remaining = res.remaining;
-  show(res.current, 'Back');
+  const res = await run('pr_rowAt', state.sheet, row, state.dir, opts());
+  land(res, 'Back');
 }
 
 async function setDir(d) {
@@ -398,20 +484,81 @@ async function setDir(d) {
   renderCard();
   status(state.dir === 'down' ? 'Going top → bottom' : 'Going bottom → top');
   run('pr_setPref', 'dir', state.dir).catch(() => {});
+  // The next applicant is different in the new direction.
+  if (state.current) absorb(await run('pr_hold', state.sheet, state.current.row, state.dir, opts()));
 }
 
 async function jump(where) {
-  const res = await run('pr_jump', state.sheet, where);
+  const res = await run('pr_jump', state.sheet, where, opts());
   state.dir = res.dir;
-  state.remaining = res.remaining;
-  show(res.current, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
+  land(res, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
 }
 
 async function startHere() {
-  const res = await run('pr_startHere', state.sheet);
-  state.remaining = res.remaining;
-  show(res.current, `Row ${res.current.row}`);
+  const res = await run('pr_startHere', state.sheet, state.dir, opts());
+  land(res, `Row ${res.current.row}`);
 }
+
+// "go to 722", "go to row 40", "go to Alyssa" (again for the next Alyssa).
+async function goTo(text) {
+  const cur = state.current;
+  const res = await run('pr_goto', state.sheet, text, cur ? cur.row : 1, state.dir, opts());
+  const f = res.found || {};
+  const more = f.count > 1 ? ` (${f.index} of ${f.count} matches, say it again for the next)` : '';
+  if (cur && cur.row !== res.current.row) pushHistory(cur.row);
+  land(res, `Went to ${res.current.name}${more}`);
+}
+
+/* ---------- progress ---------- */
+// Your pace: ratings per hour this session, not counting breaks longer than 5 minutes.
+function pace() {
+  const t = state.times;
+  if (t.length < 3) return 0;
+  let active = 0;
+  for (let i = 1; i < t.length; i++) active += Math.min(t[i] - t[i - 1], 5 * 60000);
+  return active > 0 ? (t.length - 1) / (active / 3600000) : 0;
+}
+
+function duration(hours, spoken) {
+  const m = Math.max(1, Math.round(hours * 60));
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (spoken) return h ? `${h} hour${h > 1 ? 's' : ''}${r ? ` and ${r} minutes` : ''}` : `${r} minutes`;
+  return h ? `${h}h ${r}m` : `${r} min`;
+}
+
+function renderProgress() {
+  const s = state.stats || { total: 0, by: {} };
+  const order = state.choices.map((c) => c.label).concat(['N/A']);
+  const parts = order.filter((l) => s.by[l]).map((l) => `${l} ${s.by[l]}`);
+  Object.keys(s.by).forEach((l) => { if (order.indexOf(l) === -1) parts.push(`${l} ${s.by[l]}`); });
+  $('progToday').textContent = `Today: ${s.total} reviewed${parts.length ? ' · ' + parts.join(' · ') : ''}`;
+  const p = pace();
+  $('progMe').textContent = p
+    ? `You: ${state.times.length} this session · ${Math.round(p)}/hr · ${state.remaining} left ≈ ${duration(state.remaining / p)} at your pace`
+    : `${state.remaining} left · your pace shows after a few ratings`;
+  $('others').hidden = !state.others;
+  $('others').textContent = `👥 ${state.others} other ${state.others > 1 ? 'people' : 'person'} reviewing now (you won’t get the same applicants)`;
+}
+
+// "progress": say where things stand.
+function sayProgress() {
+  run('pr_progress', state.sheet, opts()).then((r) => {
+    absorb(r);
+    const p = pace();
+    const msg = `${state.remaining} left. ${state.stats.total} done today.` +
+      (p ? ` At your pace, about ${duration(state.remaining / p, true)}.` : '') +
+      (state.others ? ` ${state.others} other ${state.others > 1 ? 'people are' : 'person is'} reviewing too.` : '');
+    status(msg, false, { say: msg });
+  }).catch((err) => status((err && err.message) || String(err), true));
+}
+
+// Keep holding what we're showing while you look at a portfolio for a while.
+setInterval(() => {
+  if (!state.sheet || !state.current || state.navBusy) return;
+  const row = state.current.row;
+  run('pr_hold', state.sheet, row, state.dir, opts()).then((r) => { if (state.current && state.current.row === row) absorb(r); }).catch(() => {});
+}, 3 * 60000);
 
 /* ---------- the portfolio tab / window ---------- */
 function currentUrl() {
@@ -531,6 +678,7 @@ function renderView() {
 function show(info, msg) {
   const sameRow = state.current && info && state.current.row === info.row;
   state.current = info;
+  state.peek = null;
   state.linkIndex = 0;
   if (!sameRow) { state.pending = []; state.done = []; }
   renderCard();
@@ -638,6 +786,8 @@ function helpRows() {
     rows.push(['add to …', `Also copy them into a tab when you rate them: ${state.tabs.join(', ')}. You can add more than one.`]);
     rows.push(['remove from …', 'Cancel an “add to” before rating']);
   }
+  rows.push(['go to …', '“go to 722” (applicant #), “go to row 40”, or “go to Alyssa” (again for the next match)']);
+  rows.push(['progress', 'How many are left, done today, and how long the rest will take']);
   rows.push(['notes …', 'Add a note (or say “notes”, pause, then the note)']);
   rows.push(['back', 'Previous applicant, rating unchanged']);
   rows.push(['undo', 'Revert the last rating and go back']);
@@ -725,7 +875,12 @@ $('bUndo').onclick = () => command('undo');
 $('bBack').onclick = () => command('back');
 $('dirDown').onclick = () => command('down');
 $('dirUp').onclick = () => command('up');
-$('bHere').onclick = () => enqueue(startHere);
+$('bHere').onclick = () => { state.navBusy++; enqueue(async () => { try { await startHere(); } finally { state.navBusy--; } }); };
+$('bShort').onclick = () => enqueue(async () => {
+  status('Building the shortlist…');
+  const r = await run('pr_buildShortlist');
+  status(`Shortlist tab updated: ${r.summary}`);
+});
 $('bVoice').onclick = openVoice;
 
 function submitNote() {
@@ -748,8 +903,10 @@ document.addEventListener('keydown', (e) => {
   else if (/^[1-9]$/.test(k) && Number(k) <= state.choices.length) { e.preventDefault(); command('score', Number(k)); }
 });
 
+state.navBusy++;
 enqueue(async () => {
-  const res = await run('pr_init');
+  let res;
+  try { res = await run('pr_init', opts()); } finally { state.navBusy--; }
   state.sheet = res.sheetName;
   state.dir = res.dir;
   state.view = res.view;
@@ -759,7 +916,7 @@ enqueue(async () => {
   $('title').textContent = res.title;
   renderView();
   renderChoices();
-  show(res.current, res.sheetName);
+  land(res, res.sheetName);
 });
 </script>
 </body>
