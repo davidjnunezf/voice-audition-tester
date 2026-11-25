@@ -73,6 +73,8 @@
       <tr><td>back</td><td>Previous audition, rating unchanged</td></tr>
       <tr><td>undo</td><td>Revert the last rating</td></tr>
       <tr><td>replay / pause / play</td><td>Audio controls</td></tr>
+      <tr><td>go to …</td><td>“go to 722”, “go to row 40”, or “go to Maria” (again for the next match)</td></tr>
+      <tr><td>progress</td><td>How many are left and how long the rest will take</td></tr>
     </table>
   </details>
 
@@ -104,9 +106,16 @@ const SYNONYMS = {
   top:       ['top', 'go to top', 'go to the top', 'start from the top'],
   bottom:    ['bottom', 'go to bottom', 'go to the bottom', 'start from the bottom'],
   na:        ['na', 'n a', 'not applicable', 'n slash a'],
+  progress:  ['progress', 'how many left', 'how many are left', 'how many to go', 'how many more', 'how am i doing', 'stats'],
 };
+// "go to 722", "go to row 40", "go to Maria" → { cmd: 'goto', text }. Checked after the commands above,
+// so "go to the top" / "go back" keep their meaning.
+const GOTO_PREFIX = /^\s*(?:go to|goto|go 2|jump to|skip to|find|look up|pull up)\s+(?:the\s+)?(.+?)\s*[.!?]*$/i;
 // Extra words that only count when the sidebar says which tool it is (see applyApp).
 const APP_SYNONYMS = {
+  audition: {
+    skip: ['skip', 'skip it', 'skip this one', 'skip one'],
+  },
   portfolio: {
     next: ['not feeling it', 'not feeling this', 'not feeling'],
     good: ['not bad', 'not too bad'],
@@ -161,6 +170,8 @@ function parseCommand(raw) {
   for (const cmd in extraSynonyms) {
     if (extraSynonyms[cmd].includes(s)) return { cmd };
   }
+  const g = original.match(GOTO_PREFIX);
+  if (g && g[1].trim()) return { cmd: 'goto', text: g[1].trim() };
   return null;
 }
 // "3.5", "three point five", "four and a half", "rate five", "5 out of 5" → { cmd: 'score', value }
