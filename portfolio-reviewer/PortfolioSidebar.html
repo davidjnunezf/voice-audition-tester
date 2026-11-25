@@ -45,6 +45,12 @@
     .c-good { background: var(--yellow); border-color: #f1c232; }
     .c-peak { background: var(--green); border-color: #6aa84f; }
     .c-na { background: #ea9999; border-color: #cc4125; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; align-items: center; }
+    .tabs .lbl { font-size: 11px; color: var(--muted); margin-right: 2px; }
+    .tabs button { font-size: 11px; padding: 3px 8px; border-radius: 999px; }
+    .tabs button.fit { border-color: #9aa0a6; }
+    .tabs button.pending { background: #e8f0fe; border-color: var(--accent); color: #174ea6; font-weight: 600; }
+    .tabs button.done { background: #e6f4ea; border-color: #34a853; color: #137333; font-weight: 600; }
     textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px; resize: vertical; min-height: 44px; }
     #status { margin-top: 10px; font-size: 12px; min-height: 18px; }
     #status.err { color: var(--danger); }
@@ -92,6 +98,7 @@
   </div>
 
   <div class="rate" id="rate"></div>
+  <div class="tabs" id="tabs"></div>
   <div class="row" style="margin-top:6px; flex-wrap:wrap">
     <button id="bSkip" class="small" title="Next portfolio without rating this one">Skip ⤼ <kbd>S</kbd></button>
     <button id="bLink" class="small" title="Their next link, if they gave several">Next link <kbd>L</kbd></button>
@@ -133,6 +140,9 @@ const state = {
   history: [],
   voiceSource: null,
   viewerWanted: false,   // set once the person opens the portfolio window
+  tabs: [],              // category tabs: Layout, Character Design, Story…
+  pending: [],           // tabs to copy the current applicant into when they're rated
+  done: [],              // tabs the current applicant was copied into
 };
 let viewer = null;       // the portfolio tab / window
 let queue = Promise.resolve();
@@ -151,7 +161,7 @@ function enqueue(task) {
 }
 
 /* ---------- commands (buttons, keys and voice all land here) ---------- */
-function command(cmd, arg) {
+function command(cmd, arg, tab) {
   // Window controls run straight away; everything that touches the sheet runs in order.
   if (cmd === 'open' || cmd === 'replay' || cmd === 'play') return openCurrent();
   if (cmd === 'link') return nextLink();
@@ -161,6 +171,8 @@ function command(cmd, arg) {
       case 'next': case 'good': case 'peak': case 'excellent': case 'na': return rate(cmd);
       case 'score': case 'option': return rate(cmd, arg);
       case 'skip': return skip();
+      case 'addto': return addTo(arg, tab);
+      case 'removefrom': return removeFrom(arg, tab);
       case 'note': return addNote(arg);
       case 'undo': return undo();
       case 'back': return back();
@@ -174,22 +186,133 @@ function command(cmd, arg) {
 async function rate(cmd, value) {
   const cur = state.current;
   if (!cur) throw new Error('Nothing open to rate. Try “top” or “bottom”.');
-  const res = await run('pr_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value);
-  state.undoStack.push(res.undo);
-  if (state.undoStack.length > 25) state.undoStack.shift();
+  const res = await run('pr_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value, state.pending.slice());
+  pushUndo(res.undo);
   pushHistory(cur.row);
   state.remaining = res.remaining;
   const what = res.rated.reviewed === 'No' ? 'N/A' : res.rated.rating;
-  show(res.next, `${what} → ${res.rated.name}`);
+  const synced = res.synced && res.synced.length ? ` · rating updated in ${res.synced.join(', ')}` : '';
+  show(res.next, `${what} → ${res.rated.name}${addedText(res.added)}${synced}`);
+}
+
+function pushUndo(u) {
+  state.undoStack.push(u);
+  if (state.undoStack.length > 25) state.undoStack.shift();
+}
+
+function addedText(added) {
+  if (!added || !added.length) return '';
+  return ' · added to ' + added.map((a) => a.tab + (a.updated ? ' (was already there, updated)' : '')).join(', ');
+}
+
+/* ---------- "add to …": copy the applicant into a category tab ---------- */
+const TAB_WORDS = [
+  [/\b(?:two|to|too|2)[\s-]*d\b/g, '2d'],
+  [/\b(?:vis|viz|visual)[\s-]*dev(?:elopment)?\b/g, 'visdev'],
+  [/\b(?:animation|animations|animator|animators|anime|animated)\b/g, 'anim'],
+  [/\bprops\b/g, 'prop'],
+  [/\b(?:storyboards?|storyboarding|storyboarder)\b/g, 'story'],
+  [/\bcharacters\b/g, 'character'],
+  [/\bcreatures\b/g, 'creature'],
+  [/\blayouts\b/g, 'layout'],
+  [/\b(?:promotional|promos)\b/g, 'promo'],
+  [/\bdesigners?\b/g, 'design'],
+];
+function tabKey(text) {
+  let t = ' ' + String(text || '').toLowerCase() + ' ';
+  TAB_WORDS.forEach(([re, r]) => { t = t.replace(re, r); });
+  return t.replace(/[^a-z0-9]/g, '');
+}
+
+// "character" → Character Design, "vis dev" → Visdev, "2D animation" → 2D ANIM …
+function matchTab(text) {
+  const k = tabKey(text).replace(/^the/, '').replace(/(?:tabs?|sheet)$/, '');
+  if (!k) return { err: 'Say which tab, e.g. “add to layout”.' };
+  const all = state.tabs.map((t) => ({ t, k: tabKey(t) }));
+  let hits = all.filter((x) => x.k === k);
+  if (!hits.length) hits = all.filter((x) => x.k.indexOf(k) === 0);
+  if (!hits.length && k.length >= 4) hits = all.filter((x) => x.k.indexOf(k) !== -1 || k.indexOf(x.k) === 0);
+  if (hits.length === 1) return { tab: hits[0].t };
+  if (hits.length > 1) return { err: `Which tab: ${hits.map((h) => h.t).join(', ')}?` };
+  return { err: `No tab called “${text}”. Tabs: ${state.tabs.join(', ') || 'none found'}.` };
+}
+
+async function addTo(text, tabName) {
+  const cur = state.current;
+  if (!cur) throw new Error('Nothing open.');
+  const m = tabName ? { tab: tabName } : matchTab(text);
+  if (m.err) throw new Error(m.err);
+  if (state.done.indexOf(m.tab) !== -1) { status(`${cur.name} is already in ${m.tab}.`); return; }
+  if (!cur.reviewed) {
+    // Not rated yet: copy when they are, so the copy has the rating in it.
+    if (state.pending.indexOf(m.tab) === -1) state.pending.push(m.tab);
+    renderTabs();
+    status(`Will add ${cur.name} to ${state.pending.join(' + ')} when you rate them.`);
+    return;
+  }
+  const res = await run('pr_addTo', state.sheet, cur.row, [m.tab]);
+  pushUndo(res.undo);
+  res.added.forEach((a) => state.done.push(a.tab));
+  renderTabs();
+  status(`Added ${cur.name}${addedText(res.added).replace(' · added', '')}`);
+}
+
+function removeFrom(text, tabName) {
+  const m = tabName ? { tab: tabName } : matchTab(text);
+  if (m.err) throw new Error(m.err);
+  if (state.pending.indexOf(m.tab) !== -1) {
+    state.pending = state.pending.filter((t) => t !== m.tab);
+    renderTabs();
+    status(`Won’t add them to ${m.tab}.`);
+  } else if (state.done.indexOf(m.tab) !== -1) {
+    status(`Already copied to ${m.tab}. Say “undo” to take it back out.`);
+  } else {
+    status(`They weren’t going into ${m.tab}.`);
+  }
+}
+
+function toggleTab(tab) {
+  if (state.pending.indexOf(tab) !== -1) return command('removefrom', null, tab);
+  return command('addto', null, tab);
+}
+
+function renderTabs() {
+  const box = $('tabs');
+  box.innerHTML = '';
+  if (!state.tabs.length) return;
+  const c = state.current;
+  const lbl = document.createElement('span');
+  lbl.className = 'lbl';
+  lbl.textContent = 'Add to:';
+  box.appendChild(lbl);
+  const roles = c ? tabKey(c.roles) : '';
+  state.tabs.forEach((t) => {
+    const b = document.createElement('button');
+    const done = state.done.indexOf(t) !== -1;
+    const pending = state.pending.indexOf(t) !== -1;
+    b.textContent = (done ? '✓ ' : pending ? '+ ' : '') + t;
+    b.className = done ? 'done' : pending ? 'pending' : (roles && roles.indexOf(tabKey(t)) !== -1 ? 'fit' : '');
+    b.title = done ? 'Copied into this tab' : pending ? 'Will be copied when you rate them (click to cancel)' : 'Copy them into this tab when you rate them';
+    b.disabled = !c || done;
+    b.onclick = () => toggleTab(t);
+    box.appendChild(b);
+  });
 }
 
 async function skip() {
   const cur = state.current;
   if (!cur) throw new Error('Nothing open to skip.');
+  let note = '';
+  if (state.pending.length) {
+    // They asked for these tabs, so copy them even though they're skipping the rating.
+    const add = await run('pr_addTo', state.sheet, cur.row, state.pending.slice());
+    pushUndo(add.undo);
+    note = addedText(add.added);
+  }
   const res = await run('pr_skip', state.sheet, cur.row, state.dir);
   pushHistory(cur.row);
   state.remaining = res.remaining;
-  show(res.next, `Skipped ${cur.name}`);
+  show(res.next, `Skipped ${cur.name}${note}`);
 }
 
 function pushHistory(row) {
@@ -214,9 +337,21 @@ async function undo() {
   const u = state.undoStack.pop();
   if (!u) throw new Error('Nothing to undo.');
   const res = await run('pr_undo', state.sheet, u);
+  const took = res.removed && res.removed.length ? ` · also undone in ${res.removed.join(', ')}` : '';
+  if (u.kind === 'add') {
+    state.remaining = res.remaining;
+    if (state.current && state.current.row === u.row) {
+      state.done = state.done.filter((t) => res.removed.indexOf(t) === -1);
+      renderTabs();
+      status(`Undid “add to”${took.replace('also undone in', 'took them out of')}`);
+    } else {
+      show(res.current, `Undid “add to”${took.replace('also undone in', 'took them out of')}`);
+    }
+    return;
+  }
   if (state.history[state.history.length - 1] === u.row) state.history.pop();
   state.remaining = res.remaining;
-  show(res.current, `Undid rating → ${res.current.name}`);
+  show(res.current, `Undid rating → ${res.current.name}${took}`);
 }
 
 async function back() {
@@ -368,9 +503,12 @@ function renderView() {
 
 /* ---------- rendering ---------- */
 function show(info, msg) {
+  const sameRow = state.current && info && state.current.row === info.row;
   state.current = info;
   state.linkIndex = 0;
+  if (!sameRow) { state.pending = []; state.done = []; }
   renderCard();
+  renderTabs();
   const now = info ? `Now: ${info.name} (#${info.number || '?'}, row ${info.row})` : 'All done in this direction 🎉';
   let extra = '';
   if (info && !info.links.length) extra = ' · No portfolio link. Say “N/A” or “skip”.';
@@ -470,6 +608,10 @@ function helpRows() {
   rows.push(['skip', 'Next portfolio without rating this one']);
   rows.push(['link', 'Their next link, if they gave several']);
   rows.push(['open', 'Show this portfolio again']);
+  if (state.tabs.length) {
+    rows.push(['add to …', `Also copy them into a tab when you rate them: ${state.tabs.join(', ')}. You can add more than one.`]);
+    rows.push(['remove from …', 'Cancel an “add to” before rating']);
+  }
   rows.push(['notes …', 'Add a note (or say “notes”, pause, then the note)']);
   rows.push(['back', 'Previous applicant, rating unchanged']);
   rows.push(['undo', 'Revert the last rating and go back']);
@@ -520,7 +662,7 @@ function ackVoice(source) {
       title: $('title').textContent,
       app: 'portfolio',
       heading: '🎨 Portfolio voice remote',
-      hint: 'Say “next”, “not bad”, “peak”, “skip”, “N/A” or “notes …”',
+      hint: 'Say “next”, “not bad”, “peak”, “add to layout”, “skip”, “N/A” or “notes …”',
       tip: 'Keep this window beside the portfolio, not behind it. Headphones aren’t needed here.',
       help: helpRows(),
     }, VOICE_ORIGIN);
@@ -584,6 +726,7 @@ enqueue(async () => {
   state.view = res.view;
   state.remaining = res.remaining;
   state.choices = res.choices;
+  state.tabs = res.tabs || [];
   $('title').textContent = res.title;
   renderView();
   renderChoices();
