@@ -40,6 +40,9 @@
     textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px; resize: vertical; min-height: 44px; }
     #notes { white-space: pre-wrap; font-size: 12px; color: #374151; background: var(--bg); border-radius: 6px; padding: 6px 8px; margin-top: 6px; }
     #notes:empty { display: none; }
+    .progress { margin-top: 8px; padding: 6px 8px; border-radius: 8px; background: var(--bg); font-size: 11px; color: #374151; }
+    .progress div + div { margin-top: 2px; }
+    #others { background: #fef7e0; color: #8a5a00; }
     #status { margin-top: 10px; font-size: 12px; min-height: 18px; }
     #status.err { color: var(--danger); }
     #tap { display: none; width: 100%; margin-top: 6px; background: var(--accent); color: #fff; border: 0; }
@@ -58,6 +61,11 @@
   <div class="row between">
     <h1 id="title">Loading…</h1>
     <span class="pill" id="remaining">–</span>
+  </div>
+  <div class="row" style="margin-top:4px"><span class="pill" id="others" hidden></span></div>
+  <div class="progress" id="progress">
+    <div id="progToday">Today: –</div>
+    <div id="progMe"></div>
   </div>
 
   <div class="seg" style="margin-top:8px">
@@ -84,6 +92,7 @@
     <button id="bCustom">Rate</button>
   </div>
   <div class="row" style="margin-top:6px; flex-wrap:wrap">
+    <button id="bSkip" class="small" title="Next audition without rating this one">Skip ⤼ <kbd>S</kbd></button>
     <button id="bBack" class="small" title="Previous audition (rating unchanged)">← Back <kbd>B</kbd></button>
     <button id="bUndo" class="small">↶ Undo <kbd>U</kbd></button>
     <button id="bReplay" class="small">⟲ Replay <kbd>R</kbd></button>
@@ -117,11 +126,13 @@
       <tr><td>back</td><td>Previous audition, rating unchanged (re-listen or re-rate)</td></tr>
       <tr><td>undo</td><td>Revert the last rating and go back</td></tr>
       <tr><td>replay / pause / play</td><td>Control the audio</td></tr>
+      <tr><td>skip</td><td>Next audition without rating this one</td></tr>
+      <tr><td>go to …</td><td>“go to 722” (row), “go to row 40”, or “go to Maria” (again for the next match)</td></tr>
+      <tr><td>progress</td><td>How many are left, done today, and how long the rest will take</td></tr>
     </table>
   </details>
 
 <script>
-
 const CFG = <?!= clientConfig ?>;
 
 const state = {
@@ -131,9 +142,16 @@ const state = {
   remaining: 0,
   undoStack: [],
   history: [],
-  voiceSource: null
+  voiceSource: null,
+  peek: null,      // the audition after this one, ready the moment you rate
+  navBusy: 0,      // a Back / go to / undo is on its way: ratings wait for it
+  others: 0,       // other people reviewing this sheet right now
+  stats: null,     // today's numbers for this sheet (everyone)
+  times: [],       // when you rated, this session (for your pace)
+  // Identifies this sidebar so a second reviewer skips what we're holding.
+  sid: Math.random().toString(36).slice(2) + Date.now().toString(36),
 };
-const cache = new Map(); // Drive fileId -> Promise<audio result>
+const cache = new Map();   // Drive fileId -> Promise<audio result>
 let queue = Promise.resolve();
 let token = 0;
 let player = null;
@@ -147,42 +165,116 @@ function run(fn, ...args) {
   });
 }
 function enqueue(task) {
-  queue = queue.then(task).catch((err) => status(err && err.message || String(err), true));
+  queue = queue.then(task).catch((err) => {
+    const msg = (err && err.message) || String(err);
+    // Say short problems out loud: you're listening, not looking at the sidebar.
+    status(msg, true, { say: msg.length <= 110 ? msg : 'Something went wrong. Check the sidebar.' });
+  });
   return queue;
 }
+const opts = (extra) => Object.assign({ sid: state.sid }, extra || {});
 
 /* ---------- commands (buttons, keys and voice all land here) ---------- */
+const RATE_CMDS = { next: 1, good: 1, peak: 1, excellent: 1, na: 1, score: 1 };
+const NAV_CMDS = { undo: 1, back: 1, top: 1, bottom: 1, goto: 1, down: 1, up: 1 };
+
 function command(cmd, arg) {
-  // Audio controls run immediately; everything else runs in order.
+  // Audio controls run immediately; ratings move on immediately and save in the background;
+  // everything else runs in order.
   if (cmd === 'replay') return replay();
   if (cmd === 'pause') return player && player.pause();
   if (cmd === 'play') return play();
+  if (cmd === 'progress') return sayProgress();
+  if (RATE_CMDS[cmd]) return rateNow(cmd, cmd === 'score' ? arg : undefined);
+  if (cmd === 'skip') return skipNow();
+  if (NAV_CMDS[cmd]) state.navBusy++;
   return enqueue(async () => {
-    switch (cmd) {
-      case 'next':case 'good':case 'peak':case 'excellent':case 'na':return rate(cmd);
-      case 'score':return rate(cmd, arg);
-      case 'note':return addNote(arg);
-      case 'undo':return undo();
-      case 'back':return back();
-      case 'down':case 'up':return setDir(cmd);
-      case 'top':case 'bottom':return jump(cmd);
-      default:throw new Error('Unknown command: ' + cmd);
+    try {
+      switch (cmd) {
+        case 'note': return await addNote(arg);
+        case 'undo': return await undo();
+        case 'back': return await back();
+        case 'goto': return await goTo(arg);
+        case 'down': case 'up': return await setDir(cmd);
+        case 'top': case 'bottom': return await jump(cmd);
+        default: throw new Error('Unknown command: ' + cmd);
+      }
+    } finally {
+      if (NAV_CMDS[cmd]) state.navBusy--;
     }
   });
 }
 
-async function rate(cmd, value) {
+function absorb(res) {
+  if (!res) return;
+  if (typeof res.remaining === 'number') state.remaining = res.remaining;
+  if (typeof res.others === 'number') state.others = res.others;
+  if (res.stats) state.stats = res.stats;
+  if (res.current && state.current && res.current.row === state.current.row) {
+    state.peek = res.peek || null;
+    preload(state.peek);
+  }
+  renderCard();
+  renderProgress();
+}
+
+function land(res, msg) {
+  absorb(res);
+  show(res.current, msg);
+  state.peek = res.peek || null;
+  preload(state.peek);
+}
+
+const LABELS = { next: 'Next 1', good: 'Good 3', peak: 'Peak 5', excellent: 'Peak 5', na: 'N/A' };
+
+// Instant next: move to the next audition now (its audio is already loaded) and save in the background.
+function rateNow(cmd, value) {
+  if (state.navBusy) return enqueue(async () => rateNow(cmd, value));
   const cur = state.current;
-  if (!cur) throw new Error('Nothing open to rate. Try “top” or “bottom”.');
-  stopMedia();
-  const res = await run('ar_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value);
-  state.undoStack.push(res.undo);
-  if (state.undoStack.length > 25) state.undoStack.shift();
+  if (!cur) { status('Nothing open to rate. Try “top” or “bottom”.', true, { say: 'Nothing open to rate.' }); return; }
+  const showing = state.peek && state.peek.row !== cur.row ? state.peek : null;
+  const label = cmd === 'score' ? `Custom ${value}` : LABELS[cmd] || cmd;
   state.history.push(cur.row);
   if (state.history.length > 100) state.history.shift();
-  state.remaining = res.remaining;
-  const label = { next: 'Next', good: 'Good', peak: 'Peak', excellent: 'Peak', na: 'N/A', score: 'Custom' }[cmd];
-  show(res.next, cmd === 'na' ? "N/A → " + res.rated.name : label + " " + res.rated.rating + " → " + res.rated.name);
+  if (showing) { stopMedia(); show(showing, `${label} → ${displayName(cur)} (saving…)`); }
+  else status(`Saving ${label} → ${displayName(cur)}…`);
+  enqueue(async () => {
+    let res;
+    try {
+      res = await run('ar_rate', state.sheet, cur.row, cmd, state.dir, value === undefined ? null : value, opts({ showing: showing ? showing.row : 0 }));
+    } catch (err) {
+      const m = (err && err.message) || String(err);
+      status(`Couldn’t save ${label} for ${displayName(cur)}: ${m} Say “back” to try again.`, true,
+        { say: m.length <= 90 ? 'Couldn’t save that rating. ' + m : 'Couldn’t save that rating. Say back to try again.' });
+      return;
+    }
+    state.undoStack.push(res.undo);
+    if (state.undoStack.length > 25) state.undoStack.shift();
+    state.times.push(Date.now());
+    const msg = cmd === 'na' ? `N/A → ${res.rated.name}` : `${label.split(' ')[0]} ${res.rated.rating} → ${res.rated.name}`;
+    if (!showing) { stopMedia(); return land(res, msg); }
+    if (state.current && state.current.row === showing.row) {
+      if (res.changed) { stopMedia(); land(res, `${msg} · someone else has that one, moved on`); }
+      else { absorb(res); status(`${msg} · Now: ${displayName(state.current)} (row ${state.current.row})`); }
+    } else {
+      absorb(res);
+    }
+  });
+}
+
+function skipNow() {
+  if (state.navBusy) return enqueue(async () => skipNow());
+  const cur = state.current;
+  if (!cur) { status('Nothing open to skip.', true, { say: 'Nothing open to skip.' }); return; }
+  const showing = state.peek && state.peek.row !== cur.row ? state.peek : null;
+  state.history.push(cur.row);
+  if (showing) { stopMedia(); show(showing, `Skipped ${displayName(cur)}`); }
+  enqueue(async () => {
+    const res = await run('ar_skip', state.sheet, cur.row, state.dir, opts({ showing: showing ? showing.row : 0 }));
+    if (!showing) { stopMedia(); return land(res, `Skipped ${displayName(cur)}`); }
+    if (state.current && state.current.row === showing.row && res.changed) { stopMedia(); land(res, `Skipped · someone else has that one, moved on`); }
+    else absorb(res);
+  });
 }
 
 async function addNote(text) {
@@ -195,17 +287,17 @@ async function addNote(text) {
     state.current.notes = res.notes;
     renderCard();
   }
-  status("Note added → " + cur.name);
+  status(`Note added → ${cur.name}`);
 }
 
 async function undo() {
   const u = state.undoStack.pop();
   if (!u) throw new Error('Nothing to undo.');
   stopMedia();
-  const res = await run('ar_undo', state.sheet, u);
+  const res = await run('ar_undo', state.sheet, u, state.dir, opts());
   if (state.history[state.history.length - 1] === u.row) state.history.pop();
-  state.remaining = res.remaining;
-  show(res.current, "Undid rating → " + res.current.name);
+  state.times.pop();
+  land(res, `Undid rating → ${res.current.name}`);
 }
 
 async function back() {
@@ -217,9 +309,8 @@ async function back() {
   }
   if (row < 2) throw new Error('Already at the first audition.');
   stopMedia();
-  const res = await run('ar_rowAt', state.sheet, row);
-  state.remaining = res.remaining;
-  show(res.current, 'Back');
+  const res = await run('ar_rowAt', state.sheet, row, state.dir, opts());
+  land(res, 'Back');
 }
 
 async function setDir(d) {
@@ -227,46 +318,105 @@ async function setDir(d) {
   renderCard();
   status(state.dir === 'down' ? 'Descending: top → bottom' : 'Ascending: bottom → top');
   run('ar_setDir', state.dir).catch(() => {});
-  if (state.current) prefetch(state.current);
+  // The next audition is different in the new direction.
+  if (state.current) absorb(await run('ar_hold', state.sheet, state.current.row, state.dir, opts()));
 }
 
 async function jump(where) {
   stopMedia();
-  const res = await run('ar_jump', state.sheet, where);
+  const res = await run('ar_jump', state.sheet, where, opts());
   state.dir = res.dir;
-  state.remaining = res.remaining;
-  show(res.current, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
+  land(res, where === 'top' ? 'Jumped to the top' : 'Jumped to the bottom');
 }
 
 async function startHere() {
   stopMedia();
-  const res = await run('ar_startHere', state.sheet);
-  state.remaining = res.remaining;
-  show(res.current, "Row " + res.current.row);
+  const res = await run('ar_startHere', state.sheet, state.dir, opts());
+  land(res, `Row ${res.current.row}`);
 }
+
+// "go to 722", "go to row 40", "go to Maria" (again for the next Maria).
+async function goTo(text) {
+  const cur = state.current;
+  const res = await run('ar_goto', state.sheet, text, cur ? cur.row : 1, state.dir, opts());
+  const f = res.found || {};
+  const more = f.count > 1 ? ` (${f.index} of ${f.count} matches, say it again for the next)` : '';
+  if (cur && cur.row !== res.current.row) state.history.push(cur.row);
+  stopMedia();
+  land(res, `Went to ${displayName(res.current)}${more}`);
+}
+
+/* ---------- progress ---------- */
+function pace() {
+  const t = state.times;
+  if (t.length < 3) return 0;
+  let active = 0;
+  for (let i = 1; i < t.length; i++) active += Math.min(t[i] - t[i - 1], 5 * 60000);
+  return active > 0 ? (t.length - 1) / (active / 3600000) : 0;
+}
+
+function duration(hours, spoken) {
+  const m = Math.max(1, Math.round(hours * 60));
+  const h = Math.floor(m / 60);
+  const r = m % 60;
+  if (spoken) return h ? `${h} hour${h > 1 ? 's' : ''}${r ? ` and ${r} minutes` : ''}` : `${r} minutes`;
+  return h ? `${h}h ${r}m` : `${r} min`;
+}
+
+function renderProgress() {
+  const s = state.stats || { total: 0, by: {} };
+  const keys = Object.keys(s.by).sort((a, b) => (a === 'N/A') - (b === 'N/A') || Number(a) - Number(b));
+  const parts = keys.map((k) => (k === 'N/A' ? `N/A ${s.by[k]}` : `${k}s: ${s.by[k]}`));
+  $('progToday').textContent = `Today: ${s.total} rated${parts.length ? ' · ' + parts.join(' · ') : ''}`;
+  const p = pace();
+  $('progMe').textContent = p
+    ? `You: ${state.times.length} this session · ${Math.round(p)}/hr · ${state.remaining} left ≈ ${duration(state.remaining / p)} at your pace`
+    : `${state.remaining} left · your pace shows after a few ratings`;
+  $('others').hidden = !state.others;
+  $('others').textContent = `👥 ${state.others} other ${state.others > 1 ? 'people' : 'person'} reviewing now (you won’t get the same auditions)`;
+}
+
+function sayProgress() {
+  run('ar_progress', state.sheet, opts()).then((r) => {
+    absorb(r);
+    const p = pace();
+    const msg = `${state.remaining} left. ${state.stats.total} done today.` +
+      (p ? ` At your pace, about ${duration(state.remaining / p, true)}.` : '') +
+      (state.others ? ` ${state.others} other ${state.others > 1 ? 'people are' : 'person is'} reviewing too.` : '');
+    status(msg, false, { say: msg });
+  }).catch((err) => status((err && err.message) || String(err), true));
+}
+
+// Keep holding what we're on while you listen to a long audition.
+setInterval(() => {
+  if (!state.sheet || !state.current || state.navBusy) return;
+  const row = state.current.row;
+  run('ar_hold', state.sheet, row, state.dir, opts()).then((r) => { if (state.current && state.current.row === row) absorb(r); }).catch(() => {});
+}, 3 * 60000);
 
 /* ---------- rendering ---------- */
 function show(info, msg) {
   state.current = info;
+  state.peek = null;
   const my = ++token;
   renderCard();
-  const now = info ? "Now: " + displayName(info) + " (row " + info.row + ")" : 'All done in this direction 🎉';
-  status(msg ? msg + " · " + now : now);
-  renderMedia(info, my); // not awaited, so commands never wait on audio
-  if (info) prefetch(info);
+  renderProgress();
+  const now = info ? `Now: ${displayName(info)} (row ${info.row})` : 'All done in this direction 🎉';
+  status(msg ? `${msg} · ${now}` : now);
+  renderMedia(info, my);          // not awaited, so commands never wait on audio
 }
 
 function displayName(c) {
-  const alias = c.alias && c.alias.toLowerCase() !== c.name.toLowerCase() ? " (" + c.alias + ")" : '';
+  const alias = c.alias && c.alias.toLowerCase() !== c.name.toLowerCase() ? ` (${c.alias})` : '';
   return c.name + alias;
 }
 
 function renderCard() {
-  $('remaining').textContent = state.remaining + " left";
+  $('remaining').textContent = `${state.remaining} left`;
   $('dirDown').classList.toggle('on', state.dir === 'down');
   $('dirUp').classList.toggle('on', state.dir === 'up');
   const c = state.current;
-  ['bNext', 'bGood', 'bPeak', 'bNa', 'bCustom'].forEach((id) => {$(id).disabled = !c;});
+  ['bNext', 'bGood', 'bPeak', 'bNa', 'bCustom'].forEach((id) => { $(id).disabled = !c; });
   if (!c) {
     $('name').textContent = 'All caught up';
     $('meta').textContent = 'No unlistened auditions left in this direction.';
@@ -274,9 +424,9 @@ function renderCard() {
     return;
   }
   $('name').textContent = displayName(c);
-  const bits = ["Row " + c.row];
-  if (c.listened) bits.push("Listened: " + c.listened);
-  if (c.rating) bits.push("Rated " + c.rating);
+  const bits = [`Row ${c.row}`];
+  if (c.listened) bits.push(`Listened: ${c.listened}`);
+  if (c.rating) bits.push(`Rated ${c.rating}`);
   $('meta').textContent = bits.join(' · ');
   $('notes').textContent = c.notes || '';
 }
@@ -296,7 +446,7 @@ async function renderMedia(info, my) {
   info.media.forEach((m, i) => {
     const a = document.createElement('a');
     a.href = m.url;
-    a.textContent = info.media.length > 1 ? "Open " + (i + 1) + " ↗" : 'Open ↗';
+    a.textContent = info.media.length > 1 ? `Open ${i + 1} ↗` : 'Open ↗';
     links.appendChild(a);
   });
 
@@ -320,7 +470,7 @@ async function renderMedia(info, my) {
     const yt = youTubeId(first.url);
     if (yt) {
       const f = document.createElement('iframe');
-      f.src = "https://www.youtube.com/embed/" + yt + "?autoplay=1";
+      f.src = `https://www.youtube.com/embed/${yt}?autoplay=1`;
       f.height = 170;
       f.allow = 'autoplay; encrypted-media';
       box.appendChild(f);
@@ -369,7 +519,7 @@ function mountDrivePreview(box, id, note) {
   player = null;
   if (note) addHint(box, note);
   const f = document.createElement('iframe');
-  f.src = "https://drive.google.com/file/d/" + id + "/preview";
+  f.src = `https://drive.google.com/file/d/${id}/preview`;
   f.height = 140;
   f.allow = 'autoplay';
   box.appendChild(f);
@@ -380,30 +530,30 @@ function play() {
   const p = player.play();
   if (p && p.catch) p.then(hideTap).catch(showTap);
 }
-function replay() {if (player) {player.currentTime = 0;play();}}
-function stopMedia() {if (player) {try {player.pause();} catch (e) {}}player = null;}
-function showTap() {$('tap').style.display = 'block';}
-function hideTap() {$('tap').style.display = 'none';}
+function replay() { if (player) { player.currentTime = 0; play(); } }
+function stopMedia() { if (player) { try { player.pause(); } catch (e) {} } player = null; }
+function showTap() { $('tap').style.display = 'block'; }
+function hideTap() { $('tap').style.display = 'none'; }
 
 /* ---------- audio loading + preloading ---------- */
 function loadDrive(id) {
   if (cache.has(id)) return cache.get(id);
-  const p = run('ar_getAudio', id).
-  then((res) => {
-    if (res.mode === 'inline' && res.b64) {
-      res.url = URL.createObjectURL(b64ToBlob(res.b64, res.mime));
-      delete res.b64;
-    }
-    return res;
-  }).
-  catch((err) => ({ ok: false, mode: 'preview', id, error: String(err) }));
+  const p = run('ar_getAudio', id)
+    .then((res) => {
+      if (res.mode === 'inline' && res.b64) {
+        res.url = URL.createObjectURL(b64ToBlob(res.b64, res.mime));
+        delete res.b64;
+      }
+      return res;
+    })
+    .catch((err) => ({ ok: false, mode: 'preview', id, error: String(err) }));
   cache.set(id, p);
   trimCache();
   return p;
 }
 
 function trimCache() {
-  const keep = new Set((state.current ? state.current.media : []).map((m) => m.id));
+  const keep = new Set([].concat(state.current ? state.current.media : [], state.peek ? state.peek.media : []).map((m) => m.id));
   for (const [id, p] of cache) {
     if (cache.size <= 6) break;
     if (keep.has(id)) continue;
@@ -412,13 +562,10 @@ function trimCache() {
   }
 }
 
-function prefetch(info) {
-  run('ar_peek', state.sheet, info.row, state.dir).
-  then((n) => {
-    const d = n && n.media.find((m) => m.kind === 'drive');
-    if (d) loadDrive(d.id);
-  }).
-  catch(() => {});
+// Load the next audition's audio in advance, so it plays the moment you rate.
+function preload(info) {
+  const d = info && info.media.find((m) => m.kind === 'drive');
+  if (d) loadDrive(d.id);
 }
 
 function b64ToBlob(b64, mime) {
@@ -430,21 +577,21 @@ function b64ToBlob(b64, mime) {
 
 function youTubeId(url) {
   const m = url.match(/youtu\.be\/([\w-]{11})/) ||
-  url.match(/youtube\.com\/.*[?&]v=([\w-]{11})/) ||
-  url.match(/youtube\.com\/(?:shorts|embed|live)\/([\w-]{11})/);
+            url.match(/youtube\.com\/.*[?&]v=([\w-]{11})/) ||
+            url.match(/youtube\.com\/(?:shorts|embed|live)\/([\w-]{11})/);
   return m ? m[1] : null;
 }
 
 /* ---------- status (also echoed to the voice remote) ---------- */
-function status(msg, isErr) {
+function status(msg, isErr, extra) {
   const s = $('status');
   s.textContent = msg;
   s.classList.toggle('err', !!isErr);
-  tellVoice(msg, isErr);
+  tellVoice(msg, isErr, extra);
 }
 
 /* ---------- voice remote ---------- */
-const VOICE_ORIGIN = (() => {try {return new URL(CFG.voiceUrl).origin;} catch (e) {return null;}})();
+const VOICE_ORIGIN = (() => { try { return new URL(CFG.voiceUrl).origin; } catch (e) { return null; } })();
 
 function openVoice() {
   if (!VOICE_ORIGIN || /YOUR-GITHUB-USERNAME/.test(CFG.voiceUrl)) {
@@ -455,9 +602,11 @@ function openVoice() {
   if (!w) status('Popup blocked — allow popups for docs.google.com and try again.', true);
 }
 
-function tellVoice(text, isErr) {
+// extra: { say: 'words to speak' } has the voice remote say it out loud (with a short tone).
+function tellVoice(text, isErr, extra) {
   if (!state.voiceSource) return;
-  try {state.voiceSource.postMessage({ type: 'ar-status', text, isErr: !!isErr }, VOICE_ORIGIN);} catch (e) {}
+  const msg = Object.assign({ type: 'ar-status', text, isErr: !!isErr }, extra || {});
+  try { state.voiceSource.postMessage(msg, VOICE_ORIGIN); } catch (e) {}
 }
 
 window.addEventListener('message', (e) => {
@@ -466,13 +615,18 @@ window.addEventListener('message', (e) => {
   if (d.type === 'ar-hello') {
     state.voiceSource = e.source;
     $('voiceDot').classList.add('on');
-    try {e.source.postMessage({ type: 'ar-ack', title: $('title').textContent }, VOICE_ORIGIN);} catch (err) {}
+    try {
+      e.source.postMessage({
+        type: 'ar-ack', title: $('title').textContent, app: 'audition',
+        hint: 'Say “next”, “good”, “peak”, “custom 3.5”, “skip”, “N/A”, “go to …” or “notes …”',
+      }, VOICE_ORIGIN);
+    } catch (err) {}
     return;
   }
   if (d.type === 'ar-command' && typeof d.cmd === 'string') {
     state.voiceSource = e.source;
     $('voiceDot').classList.add('on');
-    $('heard').textContent = "Heard: “" + (d.heard || d.cmd) + "”";
+    $('heard').textContent = `Heard: “${d.heard || d.cmd}”`;
     command(d.cmd, d.cmd === 'score' ? d.value : d.text);
   }
 });
@@ -488,14 +642,15 @@ $('bBack').onclick = () => command('back');
 $('bReplay').onclick = () => command('replay');
 $('dirDown').onclick = () => command('down');
 $('dirUp').onclick = () => command('up');
-$('bHere').onclick = () => enqueue(startHere);
+$('bSkip').onclick = () => command('skip');
+$('bHere').onclick = () => { state.navBusy++; enqueue(async () => { try { await startHere(); } finally { state.navBusy--; } }); };
 $('bVoice').onclick = openVoice;
 $('tap').onclick = play;
 
 function submitCustom() {
   const raw = $('customInput').value.trim();
   const v = Number(raw);
-  if (!raw || isNaN(v) || v < 0 || v > 5) {status('Custom score must be a number from 0 to 5.', true);return;}
+  if (!raw || isNaN(v) || v < 0 || v > 5) { status('Custom score must be a number from 0 to 5.', true); return; }
   $('customInput').value = '';
   $('customInput').blur();
   command('score', Math.round(v * 10) / 10);
@@ -510,30 +665,31 @@ function submitNote() {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('textarea, input')) {
-    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'noteInput') {e.preventDefault();submitNote();}
-    if (e.key === 'Enter' && e.target.id === 'customInput') {e.preventDefault();submitCustom();}
+    if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'noteInput') { e.preventDefault(); submitNote(); }
+    if (e.key === 'Enter' && e.target.id === 'customInput') { e.preventDefault(); submitCustom(); }
     if (e.key === 'Escape') e.target.blur();
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  const map = { n: 'next', g: 'good', p: 'peak', e: 'peak', x: 'na', b: 'back', u: 'undo', r: 'replay' };
+  const map = { n: 'next', g: 'good', p: 'peak', e: 'peak', x: 'na', s: 'skip', b: 'back', u: 'undo', r: 'replay' };
   const k = e.key.toLowerCase();
-  if (k === 'c') {e.preventDefault();$('customInput').focus();} else
-  if (map[k]) {e.preventDefault();command(map[k]);} else
-  if (/^[1-5]$/.test(k)) {e.preventDefault();command('score', Number(k));} else
-  if (e.key === ' ') {
+  if (k === 'c') { e.preventDefault(); $('customInput').focus(); }
+  else if (map[k]) { e.preventDefault(); command(map[k]); }
+  else if (/^[1-5]$/.test(k)) { e.preventDefault(); command('score', Number(k)); }
+  else if (e.key === ' ') {
     e.preventDefault();
-    if (player && !player.paused) player.pause();else play();
+    if (player && !player.paused) player.pause(); else play();
   }
 });
 
+state.navBusy++;
 enqueue(async () => {
-  const res = await run('ar_init');
+  let res;
+  try { res = await run('ar_init', opts()); } finally { state.navBusy--; }
   state.sheet = res.sheetName;
   state.dir = res.dir;
-  state.remaining = res.remaining;
   $('title').textContent = res.title;
-  show(res.current);
+  land(res);
 });
 </script>
 </body>
