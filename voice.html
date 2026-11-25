@@ -51,6 +51,7 @@
   <div class="box" id="status"></div>
 
   <label class="row muted" style="margin-top:10px"><input type="checkbox" id="beep" checked> Beep when a command is sent</label>
+  <label class="row muted" id="speakRow" style="margin-top:4px; display:none"><input type="checkbox" id="speak" checked> Say questions and problems out loud</label>
 
   <details>
     <summary>Commands</summary>
@@ -174,6 +175,9 @@ let noteMode = false;
 let customMode = false;
 let customTimer = null;
 let noteTimer = null;
+let askMode = null;      // { cmd } while waiting for the answer to a question from the sidebar
+let askTimer = null;
+let holdForSpeech = false;
 let lastAck = 0;
 
 /* ---------- talking to the sidebar ---------- */
@@ -207,6 +211,10 @@ window.addEventListener('message', (e) => {
     lastAck = Date.now();
     $('status').textContent = d.text;
     $('status').classList.toggle('err', !!d.isErr);
+    // Only the portfolio reviewer sends these: a tone, something to say, or a question to answer.
+    if (d.tone === 'error' || d.say || d.ask) errorTone();
+    if (d.say && $('speak').checked) speak(d.say);
+    if (d.ask && d.ask.cmd) startAskMode(d.ask);
   }
 });
 
@@ -219,6 +227,7 @@ function applyApp(d) {
   extraPrefixes = APP_PREFIXES[d.app] || [];
   if (d.heading) { $('heading').textContent = d.heading; document.title = d.heading; }
   if (d.tip) $('tip').textContent = d.tip;
+  $('speakRow').style.display = '';
   if (d.hint && !/^✓/.test($('last').textContent)) $('last').textContent = d.hint;
   if (Array.isArray(d.help)) {
     const t = $('help');
@@ -237,7 +246,7 @@ function send(parsed, heard) {
     setConn(false, 'Not connected. Open this window from the 🎤 button in the Sheets sidebar.');
     return;
   }
-  s.postMessage({ type: 'ar-command', cmd: parsed.cmd, text: parsed.text || '', value: parsed.value, heard }, '*');
+  s.postMessage({ type: 'ar-command', cmd: parsed.cmd, text: parsed.text || '', value: parsed.value, heard, answer: !!parsed.answer }, '*');
   $('last').textContent = `✓ ${heard}`;
   if ($('beep').checked) beep();
 }
@@ -252,6 +261,14 @@ function handleUtterance(alternatives) {
   for (const t of alts) {
     const p = parseCommand(t);
     if (p) { parsed = p; heard = t; break; }
+  }
+
+  if (askMode) {
+    // Answering the sidebar's question ("Which tab?"): a real command still works as normal.
+    const ask = askMode;
+    endAskMode();
+    if (parsed && ['note-start', 'custom-start', 'custom-bad'].indexOf(parsed.cmd) === -1) return send(parsed, heard);
+    return send({ cmd: ask.cmd, text: alts[0], answer: true }, alts[0]);
   }
 
   if (customMode) {
@@ -302,6 +319,48 @@ function endNoteMode() {
   noteMode = false;
   $('noteMode').style.display = 'none';
   clearTimeout(noteTimer);
+}
+function startAskMode(ask) {
+  endNoteMode();
+  endCustomMode();
+  askMode = ask;
+  $('noteMode').textContent = '❓ ' + (ask.prompt || 'Say your answer…');
+  $('noteMode').style.display = 'block';
+  clearTimeout(askTimer);
+  askTimer = setTimeout(endAskMode, 12000);
+}
+function endAskMode() {
+  if (!askMode) return;
+  askMode = null;
+  $('noteMode').style.display = 'none';
+  clearTimeout(askTimer);
+}
+
+/* ---------- talking back ---------- */
+// Recognition is paused while speaking so the mic doesn't hear the question as a command.
+function speak(text) {
+  if (!('speechSynthesis' in window) || !window.SpeechSynthesisUtterance) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-US';
+    u.rate = 1.1;
+    holdRec(true);
+    u.onend = u.onerror = () => holdRec(false);
+    setTimeout(() => holdRec(false), 9000);
+    speechSynthesis.speak(u);
+  } catch (e) {
+    holdRec(false);
+  }
+}
+function holdRec(on) {
+  if (on) {
+    holdForSpeech = true;
+    if (rec && listening) { try { rec.abort(); } catch (e) {} }
+  } else if (holdForSpeech) {
+    holdForSpeech = false;
+    if (rec && listening) setTimeout(startRec, 150);
+  }
 }
 
 /* ---------- problems, explained ---------- */
@@ -489,8 +548,8 @@ async function startListening() {
   };
   // Chrome stops recognising after a while; restart automatically.
   rec.onend = () => {
-    if (listening) setTimeout(startRec, 250);
-    else updateMic();
+    if (listening && !holdForSpeech) setTimeout(startRec, 250);
+    else if (!listening) updateMic();
   };
 
   listening = true;
@@ -517,6 +576,7 @@ function stopListening(keepProblem) {
   listening = false;
   endNoteMode();
   endCustomMode();
+  endAskMode();
   if (rec) try { rec.stop(); } catch (err) {}
   stopMeter();
   $('live').textContent = '';
@@ -531,6 +591,24 @@ function updateMic() {
 
 /* ---------- little confirmation beep ---------- */
 let audioCtx = null;
+// Two falling notes: "the sidebar needs you".
+function errorTone() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    [[523, 0], [392, 0.16]].forEach(([f, t]) => {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, audioCtx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + t + 0.15);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(audioCtx.currentTime + t);
+      o.stop(audioCtx.currentTime + t + 0.16);
+    });
+  } catch (e) {}
+}
 function beep() {
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -562,7 +640,7 @@ $('test').addEventListener('keydown', (e) => {
 
 // If Chrome paused listening while this window was hidden, pick up again when it's back.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && listening && rec) startRec();
+  if (document.visibilityState === 'visible' && listening && rec && !holdForSpeech) startRec();
 });
 
 hello();
