@@ -103,6 +103,15 @@ const APP_SYNONYMS = {
   },
 };
 let extraSynonyms = {};
+// "add to layout", "remove from story" → { cmd, text: the tab name } (portfolio mode only).
+const APP_PREFIXES = {
+  portfolio: [
+    [/^\s*(?:don'?t|do not)\s+add\s+(?:(?:it|them|him|her)\s+)?(?:to\s+)?(?:the\s+)?(.+?)(?:\s+(?:tab|sheet))?\s*[.!?]*$/i, 'removefrom'],
+    [/^\s*(?:remove|take)\s+(?:(?:it|them|him|her|this one)\s+)?(?:(?:from|off of|off|out of)\s+)?(?:the\s+)?(.+?)(?:\s+(?:tab|sheet))?\s*[.!?]*$/i, 'removefrom'],
+    [/^\s*(?:add|ad|had)\s+(?:(?:it|them|him|her|this one)\s+)?(?:(?:to|two|too|into|in)\s+)?(?:the\s+)?(.+?)(?:\s+(?:tab|sheet))?\s*[.!?]*$/i, 'addto'],
+  ],
+};
+let extraPrefixes = [];
 const NUM_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, for: 4, five: 5 };
 const NOTE_PREFIX = /^\s*(?:notes?|nodes?|add (?:a )?note)\b[\s,:.\-–]*/i;
 const CUSTOM_PREFIX = /^\s*(?:custom|costume|customer)\b[\s,:.\-–]*/i;
@@ -124,6 +133,10 @@ function parseCommand(raw) {
     const rest = original.slice(c[0].length).trim();
     if (!rest) return { cmd: 'custom-start' };
     return parseScore(rest) || { cmd: 'custom-bad', text: rest };
+  }
+  for (const [re, cmd] of extraPrefixes) {
+    const p = original.match(re);
+    if (p && p[1].trim()) return { cmd, text: p[1].trim() };
   }
   const score = parseScore(original);
   if (score) return score;
@@ -203,6 +216,7 @@ function applyApp(d) {
   if (!d.app || d.app === appliedApp) return;
   appliedApp = d.app;
   extraSynonyms = APP_SYNONYMS[d.app] || {};
+  extraPrefixes = APP_PREFIXES[d.app] || [];
   if (d.heading) { $('heading').textContent = d.heading; document.title = d.heading; }
   if (d.tip) $('tip').textContent = d.tip;
   if (d.hint && !/^✓/.test($('last').textContent)) $('last').textContent = d.hint;
